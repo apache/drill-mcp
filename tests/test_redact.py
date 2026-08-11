@@ -49,8 +49,8 @@ def test_leaves_innocuous_keys_alone():
 
 
 def test_recurses_into_nested_dicts():
-    source = {"config": {"credentialsProvider": {"awsSecretAccessKey": "s"}}}
-    assert redact(source)["config"]["credentialsProvider"]["awsSecretAccessKey"] == REDACTED
+    source = {"config": {"aws": {"awsSecretAccessKey": "s"}}}
+    assert redact(source)["config"]["aws"]["awsSecretAccessKey"] == REDACTED
 
 
 def test_recurses_into_lists():
@@ -95,3 +95,50 @@ def test_realistic_s3_plugin_config():
     assert inner["fs.s3a.secret.key"] == REDACTED
     assert inner["fs.s3a.endpoint"] == "s3.amazonaws.com"
     assert result["config"]["workspaces"]["root"]["location"] == "/"
+
+
+def test_redacts_credentials_provider_wholly():
+    source = {"credentialsProvider": {"clientID": "x"}}
+    assert redact(source)["credentialsProvider"] == REDACTED
+
+
+def test_redacts_gcs_credentials_json():
+    source = {"credentialsJson": '{"type": "service_account", "private_key": "..."}'}
+    assert redact(source)["credentialsJson"] == REDACTED
+
+
+def test_redacts_credentials_b64():
+    source = {"credentialsB64": "base64encodedkey"}
+    assert redact(source)["credentialsB64"] == REDACTED
+
+
+def test_redacts_credentials_provider_type():
+    source = {"credentialsProviderType": "com.amazonaws.auth.DefaultAWSCredentialsProviderChain"}
+    assert redact(source)["credentialsProviderType"] == REDACTED
+
+
+def test_redacts_authorization_header():
+    source = {"Authorization": "Bearer token123"}
+    assert redact(source)["Authorization"] == REDACTED
+
+
+def test_redacts_passphrase():
+    source = {"passphrase": "secret"}
+    assert redact(source)["passphrase"] == REDACTED
+
+
+def test_redacts_keytab():
+    source = {"keytab": "/path/to/user.keytab"}
+    assert redact(source)["keytab"] == REDACTED
+
+
+def test_redacts_principal():
+    source = {"principal": "user@REALM"}
+    assert redact(source)["principal"] == REDACTED
+
+
+def test_passes_through_tuples():
+    source = ({"password": "x"},)
+    result = redact(source)
+    assert isinstance(result, tuple)
+    assert result[0]["password"] == REDACTED

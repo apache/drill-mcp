@@ -33,10 +33,9 @@ REDACTED = "***REDACTED***"
 
 # Matches anywhere in the key, so `fs.s3a.secret.key` and `awsSecretAccessKey`
 # are both caught. Deliberately broad: a false redaction is a cosmetic problem,
-# a missed one is a leaked credential. Uses negative lookahead on credential(s)
-# to avoid matching keys like "credentialsProvider" where it's part of a longer word.
+# a missed one is a leaked credential.
 _SENSITIVE = re.compile(
-    r"password|passwd|secret|credentials?(?![a-z])|token|access[._-]?key|private[._-]?key|api[._-]?key",
+    r"password|passwd|secret|credential|token|access[._-]?key|private[._-]?key|api[._-]?key|authorization|passphrase|keytab|principal",
     re.IGNORECASE,
 )
 
