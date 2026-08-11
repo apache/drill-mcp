@@ -49,16 +49,36 @@ _IDENTIFIER = re.compile(r"^[A-Za-z0-9_$-]+$")
 
 # Drill's j_security_check returns HTTP 200 even on a wrong password; the only
 # signal is this marker string inside the HTML error page body. Matched
-# case-insensitively, with flexible whitespace, against the body with HTML
-# tags stripped first -- the marker can arrive with tags inside the phrase
-# (e.g. "Invalid<br>username/password credentials"), which a plain regex
-# search against the raw markup would miss.
+# case-insensitively, with flexible whitespace.
 _INVALID_CREDENTIALS = re.compile(r"invalid\s+username\s*/\s*password\s+credentials", re.IGNORECASE)
-_HTML_TAG = re.compile(r"<[^>]+>")
+
+# Approximates real tag grammar (requires '/', a letter, or '!' after '<') so
+# a stray unmatched '<' -- e.g. "1 < 2" in unrelated page text -- can't be
+# mistaken for the start of a tag and swallow everything up to the next
+# unrelated '>' in the document, potentially deleting the marker itself.
+_HTML_TAG = re.compile(r"</?[A-Za-z!][^>]*>")
 
 
 def _strip_tags(html: str) -> str:
     return _HTML_TAG.sub(" ", html)
+
+
+def _contains_invalid_credentials_marker(body: str) -> bool:
+    """True if `body` contains Drill's invalid-credentials marker.
+
+    Checks the raw body AND the tag-stripped body, and treats a match in
+    EITHER as a failure. Stripping is needed to catch the marker when tags
+    fall inside the phrase (e.g. "Invalid<br>username/password credentials"),
+    but stripping can never be trusted alone: a tag-stripping regex can only
+    approximate real HTML grammar, and any case where it over-strips (turning
+    unrelated text into something that looks like a tag) would delete the
+    marker and silently accept a failed login as successful. Checking the raw
+    body first means no stripping bug can ever suppress a detection the raw
+    search would have made on its own -- the union can only find more than
+    either check alone, never less. This is the correct posture for a check
+    that gates authentication: fail closed, not fail clever.
+    """
+    return bool(_INVALID_CREDENTIALS.search(body) or _INVALID_CREDENTIALS.search(_strip_tags(body)))
 
 
 class DrillError(Exception):
@@ -167,7 +187,7 @@ class RestClient:
                 f"authentication endpoint at {self._config.url} returned "
                 f"HTTP {response.status_code}"
             )
-        if _INVALID_CREDENTIALS.search(_strip_tags(response.text)):
+        if _contains_invalid_credentials_marker(response.text):
             raise DrillError(
                 f"authentication failed for user {self._config.user!r} at {self._config.url}"
             )

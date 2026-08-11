@@ -249,9 +249,70 @@ class TestBasicAuth:
         assert "s3cret" not in str(exc.value)
 
     @respx.mock
+    def test_login_rejects_marker_after_a_stray_unmatched_angle_bracket(self):
+        """Regression test: a naive tag-strip regex (`<[^>]+>`) treats any
+        '<...>' span as a tag, so a stray unmatched '<' before the marker
+        (e.g. '1 < 2' in unrelated error text) makes the substitution eat
+        everything up to the next unrelated '>' in the document -- including
+        the marker itself -- turning a genuinely failed login into an
+        apparent success. Checking the raw body as well as the stripped body
+        is what prevents that."""
+        respx.post(f"{BASE}/j_security_check").mock(
+            return_value=httpx.Response(
+                200,
+                text=(
+                    "<div>Warning: 1 < 2 in the system. "
+                    "Invalid username/password credentials</div>"
+                ),
+            )
+        )
+        with pytest.raises(DrillError, match="authentication") as exc:
+            make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+        assert "s3cret" not in str(exc.value)
+
+    @respx.mock
+    def test_login_rejects_marker_after_an_unclosed_angle_bracket(self):
+        """A stray '<' with no matching '>' anywhere in the body at all."""
+        respx.post(f"{BASE}/j_security_check").mock(
+            return_value=httpx.Response(
+                200,
+                text="value < 5. Invalid username/password credentials",
+            )
+        )
+        with pytest.raises(DrillError, match="authentication") as exc:
+            make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+        assert "s3cret" not in str(exc.value)
+
+    @respx.mock
+    def test_login_rejects_plain_marker_with_no_markup(self):
+        respx.post(f"{BASE}/j_security_check").mock(
+            return_value=httpx.Response(200, text="Invalid username/password credentials")
+        )
+        with pytest.raises(DrillError, match="authentication") as exc:
+            make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+        assert "s3cret" not in str(exc.value)
+
+    @respx.mock
     def test_login_succeeds_on_200_with_ordinary_body(self):
         login = respx.post(f"{BASE}/j_security_check").mock(
             return_value=httpx.Response(200, text="<html><body>Welcome</body></html>")
+        )
+        respx.post(f"{BASE}/query.json").mock(
+            return_value=httpx.Response(200, json={"columns": ["a"], "rows": []})
+        )
+        result = make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+        assert login.called
+        assert result.columns == ["a"]
+
+    @respx.mock
+    def test_login_succeeds_with_incidental_angle_brackets_in_a_normal_body(self):
+        """Fail-closed direction: confirm the union check (raw OR stripped)
+        has not made ordinary successful logins start failing just because
+        the body happens to contain '<' and '>' characters."""
+        login = respx.post(f"{BASE}/j_security_check").mock(
+            return_value=httpx.Response(
+                200, text="<div>Welcome back. Your balance is < 100 and > 0.</div>"
+            )
         )
         respx.post(f"{BASE}/query.json").mock(
             return_value=httpx.Response(200, json={"columns": ["a"], "rows": []})
