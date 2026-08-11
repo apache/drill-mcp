@@ -31,31 +31,31 @@ class TestSqlglotAssumptions:
     """Characterization tests: what the guard relies on sqlglot doing."""
 
     def test_parse_returns_one_statement_per_semicolon(self):
-        assert len(sqlglot.parse("SELECT 1; SELECT 2", read="postgres")) == 2
+        assert len(sqlglot.parse("SELECT 1; SELECT 2", read="drill")) == 2
 
     def test_select_parses_to_select(self):
-        stmt = sqlglot.parse_one("SELECT * FROM dfs.tmp.foo", read="postgres")
+        stmt = sqlglot.parse_one("SELECT * FROM dfs.tmp.foo", read="drill")
         assert isinstance(stmt, exp.Select)
 
     def test_table_exposes_catalog_db_name(self):
-        table = sqlglot.parse_one("SELECT * FROM dfs.tmp.foo", read="postgres").find(exp.Table)
+        table = sqlglot.parse_one("SELECT * FROM dfs.tmp.foo", read="drill").find(exp.Table)
         assert table.catalog == "dfs"
         assert table.db == "tmp"
         assert table.name == "foo"
 
     def test_two_part_name_populates_db_not_catalog(self):
-        table = sqlglot.parse_one("SELECT * FROM sys.options", read="postgres").find(exp.Table)
+        table = sqlglot.parse_one("SELECT * FROM sys.options", read="drill").find(exp.Table)
         assert table.catalog == ""
         assert table.db == "sys"
         assert table.name == "options"
 
     def test_comments_are_stripped_by_the_tokenizer(self):
-        stmt = sqlglot.parse_one("-- CREATE TABLE evil\nSELECT 1", read="postgres")
+        stmt = sqlglot.parse_one("-- CREATE TABLE evil\nSELECT 1", read="drill")
         assert isinstance(stmt, exp.Select)
 
     def test_ctas_target_is_reachable_from_this(self):
         stmt = sqlglot.parse_one(
-            "CREATE TABLE dfs.tmp.out AS SELECT * FROM dfs.raw.src", read="postgres"
+            "CREATE TABLE dfs.tmp.out AS SELECT * FROM dfs.raw.src", read="drill"
         )
         assert isinstance(stmt, exp.Create)
         target = stmt.this.this if isinstance(stmt.this, exp.Schema) else stmt.this
@@ -292,6 +292,34 @@ class TestHiddenSchemas:
         check("SELECT 'sys.options' AS note FROM dfs.tmp.a", HIDDEN)
 
 
+class TestDrillDialectRegressions:
+    """Regression coverage for the Postgres -> Drill dialect switch.
+
+    Under the Postgres dialect these idiomatic Drill query forms failed to
+    parse and were wrongly rejected: backtick identifier quoting (Drill's
+    standard quoting) and querying a file directly by path, the single most
+    common Drill query shape. The Drill dialect parses both.
+    """
+
+    def test_file_path_query_with_backtick_quoting_is_permitted(self):
+        check("SELECT * FROM dfs.`/path/to/file.csv`", CLOSED)
+
+    def test_information_schema_with_backtick_quoting_is_permitted(self):
+        check("SELECT * FROM INFORMATION_SCHEMA.`TABLES`", CLOSED)
+
+    def test_backtick_quoted_write_target_rejected_by_default(self):
+        with pytest.raises(PolicyError):
+            check("CREATE TABLE dfs.tmp.`out` AS SELECT 1", CLOSED)
+
+    def test_backtick_quoted_write_target_permitted_with_allowlist(self):
+        check("CREATE TABLE dfs.tmp.`out` AS SELECT 1", OPEN)
+
+    def test_backtick_quoted_hidden_schema_still_caught(self):
+        hidden = Policy(hidden_schemas=("sys",))
+        with pytest.raises(PolicyError, match="hidden"):
+            check("SELECT * FROM `sys`.options", hidden)
+
+
 class TestCoverageGaps:
     """Exercises branches not reached by the scenarios above, so guard.py stays
     at 100% line coverage without weakening any other test.
@@ -315,6 +343,10 @@ class TestCoverageGaps:
     def test_create_of_unsupported_kind_rejected(self):
         with pytest.raises(PolicyError, match="not permitted"):
             check("CREATE SCHEMA foo", CLOSED)
+
+    def test_drop_of_unsupported_kind_rejected(self):
+        with pytest.raises(PolicyError, match="not permitted"):
+            check("DROP SCHEMA foo", CLOSED)
 
     def test_ctas_with_explicit_column_list_permitted(self):
         # The parenthesized column list wraps the target table in an

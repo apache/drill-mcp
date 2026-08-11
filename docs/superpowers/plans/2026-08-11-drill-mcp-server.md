@@ -331,7 +331,7 @@ git commit -m "feat: package skeleton and configuration loading"
   - `drill_mcp.guard.check(sql: str, policy: Policy) -> None` — returns `None` if permitted, raises `PolicyError` otherwise
   - `drill_mcp.guard.matches_prefix(qualified: str, entries: Iterable[str]) -> bool`
 
-**Background for the implementer:** Drill's SQL is Apache Calcite–based. `sqlglot` has no Drill dialect; the Postgres dialect is the closest fit and is what this module uses. `sqlglot.parse()` returns a *list* of statements, which is how statement-stacking is detected. Constructs sqlglot does not recognize become `exp.Command`, a catch-all node holding the leading keyword and the raw remainder — so `exp.Command` must never be blanket-allowed.
+**Background for the implementer:** Drill's SQL is Apache Calcite–based, and `sqlglot` ships a native `Drill` dialect — parse with `read="drill"`. Do not substitute a near neighbour: under the Postgres dialect `sqlglot` raises `ParseError` on backtick-quoted identifiers, and because the guard rejects whatever it cannot parse, that silently turns `SELECT * FROM dfs.`/path/file.csv`` and `SELECT * FROM INFORMATION_SCHEMA.`TABLES`` into policy rejections. `sqlglot.parse()` returns a *list* of statements, which is how statement-stacking is detected. Constructs sqlglot does not recognize become `exp.Command`, a catch-all node holding the leading keyword and the raw remainder — so `exp.Command` must never be blanket-allowed.
 
 - [ ] **Step 1: Write a characterization test for sqlglot's parse tree**
 
@@ -351,31 +351,31 @@ class TestSqlglotAssumptions:
     """Characterization tests: what the guard relies on sqlglot doing."""
 
     def test_parse_returns_one_statement_per_semicolon(self):
-        assert len(sqlglot.parse("SELECT 1; SELECT 2", read="postgres")) == 2
+        assert len(sqlglot.parse("SELECT 1; SELECT 2", read="drill")) == 2
 
     def test_select_parses_to_select(self):
-        stmt = sqlglot.parse_one("SELECT * FROM dfs.tmp.foo", read="postgres")
+        stmt = sqlglot.parse_one("SELECT * FROM dfs.tmp.foo", read="drill")
         assert isinstance(stmt, exp.Select)
 
     def test_table_exposes_catalog_db_name(self):
-        table = sqlglot.parse_one("SELECT * FROM dfs.tmp.foo", read="postgres").find(exp.Table)
+        table = sqlglot.parse_one("SELECT * FROM dfs.tmp.foo", read="drill").find(exp.Table)
         assert table.catalog == "dfs"
         assert table.db == "tmp"
         assert table.name == "foo"
 
     def test_two_part_name_populates_db_not_catalog(self):
-        table = sqlglot.parse_one("SELECT * FROM sys.options", read="postgres").find(exp.Table)
+        table = sqlglot.parse_one("SELECT * FROM sys.options", read="drill").find(exp.Table)
         assert table.catalog == ""
         assert table.db == "sys"
         assert table.name == "options"
 
     def test_comments_are_stripped_by_the_tokenizer(self):
-        stmt = sqlglot.parse_one("-- CREATE TABLE evil\nSELECT 1", read="postgres")
+        stmt = sqlglot.parse_one("-- CREATE TABLE evil\nSELECT 1", read="drill")
         assert isinstance(stmt, exp.Select)
 
     def test_ctas_target_is_reachable_from_this(self):
         stmt = sqlglot.parse_one(
-            "CREATE TABLE dfs.tmp.out AS SELECT * FROM dfs.raw.src", read="postgres"
+            "CREATE TABLE dfs.tmp.out AS SELECT * FROM dfs.raw.src", read="drill"
         )
         assert isinstance(stmt, exp.Create)
         target = stmt.this.this if isinstance(stmt.this, exp.Schema) else stmt.this
@@ -550,7 +550,7 @@ from dataclasses import dataclass
 import sqlglot
 from sqlglot import exp
 
-DIALECT = "postgres"  # closest available fit for Drill's Calcite SQL
+DIALECT = "drill"  # sqlglot ships a native Drill dialect — do not substitute a near neighbour
 
 # Commands sqlglot does not model as expressions, but which cannot write.
 _SAFE_COMMANDS = {"SHOW", "DESCRIBE", "DESC", "EXPLAIN"}
@@ -824,8 +824,15 @@ def test_leaves_innocuous_keys_alone():
 
 
 def test_recurses_into_nested_dicts():
-    source = {"config": {"credentialsProvider": {"awsSecretAccessKey": "s"}}}
-    assert redact(source)["config"]["credentialsProvider"]["awsSecretAccessKey"] == REDACTED
+    # Nested under a neutral container on purpose: a key like `credentialsProvider`
+    # is itself sensitive-named and gets blanked wholesale, so it cannot double as
+    # the vehicle for proving recursion.
+    source = {"config": {"aws": {"awsSecretAccessKey": "s"}}}
+    assert redact(source)["config"]["aws"]["awsSecretAccessKey"] == REDACTED
+
+
+def test_blanks_a_credentials_provider_block_wholesale():
+    assert redact({"credentialsProvider": {"clientID": "x"}})["credentialsProvider"] == REDACTED
 
 
 def test_recurses_into_lists():

@@ -88,9 +88,25 @@ window.
 access keys, JDBC passwords, and OAuth tokens. Before returning, the server
 walks the config tree and replaces the value of any key matching a redaction
 pattern (`password`, `secret`, `accessKey`, `access_key`, `token`, `credential`,
-`privateKey`, case-insensitive) with `"***REDACTED***"`. Redaction is applied
-recursively, including inside `credentialsProvider` blocks and nested
-`workspaces` entries.
+`privateKey`, `apiKey`, `authorization`, `passphrase`, `keytab`, `principal`,
+case-insensitive) with `"***REDACTED***"`. Redaction recurses through nested
+dicts, lists, and tuples — `workspaces` entries included.
+
+A key whose *name* matches is blanked wholesale rather than walked, so an
+unrecognized child key under a recognized parent cannot leak. That means a
+`credentialsProvider` block is replaced entirely rather than descended into: it
+is by definition all credentials, and walking it would make safety depend on
+every child key name matching, which nothing enforces across third-party
+provider implementations. `authorization` is on the list because Drill's HTTP
+plugin carries bearer tokens in a `headers` block.
+
+The pattern is matched as a substring of the key, so `fs.s3a.secret.key` and
+`awsSecretAccessKey` are both caught. Resist narrowing it with lookaheads: a
+lookahead silently generalizes to key names nobody enumerated. An early
+implementation excluded `credentialsProvider` with a `(?![a-z])` lookahead and
+thereby also un-redacted `credentialsJson`, `credentialsB64`, and
+`serviceAccountCredentialsJson` — the standard shapes for an inlined GCP
+service-account private key.
 
 This is a trust boundary: MCP tool output goes to a model and often to a
 third-party API. Redaction is not configurable off.
@@ -132,9 +148,15 @@ writable_plugins: []      # e.g. [dfs.tmp]
 statement stacking. The guard is the only thing standing between a model and the
 user's data, so it gets a real parser.
 
-Drill's SQL is Calcite-based; `sqlglot`'s Postgres dialect is the closest fit.
-Where a legitimate Drill query fails to parse, the failure is a rejection with a
-clear message naming `guard.py` — a false negative that blocks a read is
+`sqlglot` ships a native `Drill` dialect, and the guard parses with
+`read="drill"`. Use it rather than approximating with a near neighbour: under
+the Postgres dialect, `sqlglot` raises `ParseError` on backtick-quoted
+identifiers, and since the guard rejects whatever it cannot parse, that turned
+`SELECT * FROM dfs.`/path/file.csv`` — the most idiomatic Drill query there is —
+into a policy rejection.
+
+Where a legitimate Drill query still fails to parse, the failure is a rejection
+with a clear message naming `guard.py` — a false negative that blocks a read is
 acceptable; a false positive that permits a write is not.
 
 ## Hidden schemas

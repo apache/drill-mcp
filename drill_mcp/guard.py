@@ -37,7 +37,7 @@ from dataclasses import dataclass
 import sqlglot
 from sqlglot import exp
 
-DIALECT = "postgres"  # closest available fit for Drill's Calcite SQL
+DIALECT = "drill"  # sqlglot ships a native Drill dialect (sqlglot.dialects.drill.Drill).
 
 # Commands sqlglot does not model as expressions, but which cannot write.
 # EXPLAIN is handled separately (see _check_write): it is not blanket-safe
@@ -48,9 +48,9 @@ _READ_TYPES = (exp.Select, exp.Union, exp.Intersect, exp.Except, exp.Subquery, e
 
 # Node types that indicate a write is embedded somewhere inside a statement
 # whose root node is a read type (e.g. `WITH x AS (INSERT ...) SELECT * FROM x`,
-# or Postgres-dialect `SELECT ... INTO`). Checking only the root type is not
-# enough: the safety property must not depend on Drill's parser being any
-# narrower than sqlglot's Postgres dialect.
+# or `SELECT ... INTO ...`). Checking only the root type is not enough: the
+# safety property must not depend on sqlglot's Drill grammar rejecting these
+# forms outright — a write hidden deeper in the tree must still be caught.
 _EMBEDDED_WRITE_TYPES = (exp.Insert, exp.Update, exp.Delete, exp.Merge, exp.Create, exp.Drop, exp.Into)
 
 # EXPLAIN unwraps its body and re-checks it recursively; this bounds
