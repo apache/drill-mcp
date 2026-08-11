@@ -11,6 +11,24 @@ management state. Intended to be donated as the official Drill MCP server, so it
 must be conservative by default: a misbehaving model must not be able to mutate
 cluster configuration or write data into a store nobody authorized.
 
+## Reference implementations
+
+Consult these for Drill wire behavior rather than reasoning from first
+principles — REST auth, INFORMATION_SCHEMA query shapes, identifier quoting,
+JDBC connection strings, type mapping:
+
+- **`sqlalchemy-drill`** — the actively maintained Drill dialect for SQLAlchemy,
+  covering both the REST and JDBC paths. The authority used here.
+- **PyDrill** — a Python client for Drill's REST API.
+
+Neither is a runtime dependency. PyDrill was evaluated and rejected as one: its
+last release was April 2018, and it supports only HTTP basic auth via a
+`requests` session, with no `j_security_check` form login and no Kerberos —
+precisely the two auth modes this server requires. It would have saved a handful
+of GET wrappers while adding a stale dependency to a project intended for ASF
+donation, and it exposes `storage_enable`, a mutation this design never
+implements.
+
 ## Non-goals
 
 - Storage plugin creation, update, or deletion. These REST endpoints are never
@@ -194,6 +212,13 @@ Three modes, selected by config:
 - `basic` — Drill's HTTP form login (`/j_security_check`); the resulting session
   cookie is held on the httpx client and reused. On a 401 mid-session the client
   re-authenticates once and retries.
+
+  **A login is successful only when the status is 200 *and* the body does not
+  contain Drill's `Invalid username/password credentials` marker.** Drill
+  returns 200 with an HTML error page on bad credentials, so a status-only check
+  accepts a wrong password as a successful login. `sqlalchemy-drill` does the
+  same two-part check (`sqlalchemy_drill/drilldbapi/_drilldbapi.py`), treating a
+  non-200 as a connection failure and the body marker as an auth failure.
 - `kerberos` — SPNEGO via `requests-kerberos`/`httpx-gssapi` for REST; the JDBC
   backend uses the driver's own Kerberos support.
 
