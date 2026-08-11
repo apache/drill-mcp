@@ -106,7 +106,15 @@ writable_plugins: []      # e.g. [dfs.tmp]
 `guard.py` parses each statement with `sqlglot` and applies:
 
 - Exactly one statement per call. Multiple statements are rejected.
-- `SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN`, and `WITH ... SELECT` are allowed.
+- `SELECT`, `SHOW`, `DESCRIBE`, and `WITH ... SELECT` are allowed. The read
+  branch sweeps the whole subtree, not just the root node, so a read-rooted
+  statement that writes deeper down (`WITH x AS (INSERT ... RETURNING *)
+  SELECT ...`, `SELECT ... INTO ...`) is still rejected.
+- `EXPLAIN` is allowed, but the guard strips the leading `EXPLAIN` /
+  `EXPLAIN PLAN FOR` and re-checks the remainder, so the write allowlist and
+  hidden-schema rules apply to the explained statement. Allowing `EXPLAIN` on
+  the strength of its leading keyword alone would let `EXPLAIN PLAN FOR CREATE
+  TABLE ...` reach Drill without the allowlist ever running.
 - `CREATE TABLE AS`, `CREATE VIEW`, `CREATE TEMPORARY TABLE AS`, `DROP TABLE`,
   and `DROP VIEW` are allowed **only** when the target's leading identifier
   (the plugin, or plugin plus workspace) matches an entry in
@@ -114,7 +122,10 @@ writable_plugins: []      # e.g. [dfs.tmp]
   `dfs` permits `dfs.tmp.foo`; an entry of `dfs.tmp` does not permit `dfs.raw.foo`.
 - Everything else — `INSERT`, `ALTER`, `SET`, `USE`, `REFRESH`, anything
   unrecognized — is rejected.
-- A parse failure is a rejection, not a pass-through.
+- A parse failure is a rejection, not a pass-through. This covers tokenizer
+  failures (`sqlglot.errors.TokenError`) as well as parse failures — they are
+  siblings under `SqlglotError`, not parent and child, and unterminated string
+  literals are exactly the input an adversarial caller produces.
 
 `sqlglot` rather than regex, deliberately. A regex guard is defeated by
 `-- CREATE TABLE` in a comment or `'DROP TABLE'` inside a string literal, and by

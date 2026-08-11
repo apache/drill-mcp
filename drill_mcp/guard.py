@@ -21,9 +21,22 @@ from sqlglot import exp
 DIALECT = "postgres"  # closest available fit for Drill's Calcite SQL
 
 # Commands sqlglot does not model as expressions, but which cannot write.
-_SAFE_COMMANDS = {"SHOW", "DESCRIBE", "DESC", "EXPLAIN"}
+# EXPLAIN is handled separately (see _check_write): it is not blanket-safe
+# because its body can itself be a write.
+_SAFE_COMMANDS = {"SHOW", "DESCRIBE", "DESC"}
 
 _READ_TYPES = (exp.Select, exp.Union, exp.Intersect, exp.Except, exp.Subquery, exp.Describe)
+
+# Node types that indicate a write is embedded somewhere inside a statement
+# whose root node is a read type (e.g. `WITH x AS (INSERT ...) SELECT * FROM x`,
+# or Postgres-dialect `SELECT ... INTO`). Checking only the root type is not
+# enough: the safety property must not depend on Drill's parser being any
+# narrower than sqlglot's Postgres dialect.
+_EMBEDDED_WRITE_TYPES = (exp.Insert, exp.Update, exp.Delete, exp.Merge, exp.Create, exp.Drop, exp.Into)
+
+# EXPLAIN unwraps its body and re-checks it recursively; this bounds
+# `EXPLAIN EXPLAIN EXPLAIN ...` so a malicious input cannot blow the stack.
+_MAX_EXPLAIN_DEPTH = 5
 
 
 class PolicyError(Exception):
@@ -60,12 +73,19 @@ def matches_prefix(qualified: str, entries: Iterable[str]) -> bool:
 
 def check(sql: str, policy: Policy) -> None:
     """Return None if `sql` is permitted under `policy`; raise PolicyError otherwise."""
+    _check(sql, policy, depth=0)
+
+
+def _check(sql: str, policy: Policy, depth: int) -> None:
     if not sql or not sql.strip():
         raise PolicyError("empty SQL statement")
 
     try:
         statements = [s for s in sqlglot.parse(sql, read=DIALECT) if s is not None]
-    except sqlglot.ParseError as exc:
+    except sqlglot.errors.SqlglotError as exc:
+        # Catches both ParseError and TokenError (siblings under SqlglotError,
+        # not parent/child) — malformed input such as an unterminated string
+        # literal must be a PolicyError, never an uncaught crash.
         raise PolicyError(
             f"could not parse SQL, so it cannot be checked against policy and is rejected: {exc}"
         ) from exc
@@ -77,15 +97,28 @@ def check(sql: str, policy: Policy) -> None:
 
     statement = statements[0]
     _check_hidden(statement, policy)
-    _check_write(statement, policy)
+    _check_write(statement, policy, depth)
 
 
-def _check_write(statement: exp.Expression, policy: Policy) -> None:
+def _check_write(statement: exp.Expression, policy: Policy, depth: int) -> None:
     if isinstance(statement, _READ_TYPES):
+        embedded = statement.find(*_EMBEDDED_WRITE_TYPES)
+        if embedded is not None:
+            raise PolicyError(
+                f"statement contains an embedded {embedded.key.upper()}, which is not permitted"
+            )
         return
 
     if isinstance(statement, exp.Command):
         keyword = str(statement.this or "").upper()
+        if keyword == "EXPLAIN":
+            if depth >= _MAX_EXPLAIN_DEPTH:
+                raise PolicyError("too many nested EXPLAIN statements")
+            body = _explain_body(statement)
+            if not body.strip():
+                raise PolicyError("EXPLAIN with no statement body is not permitted")
+            _check(body, policy, depth + 1)
+            return
         if keyword in _SAFE_COMMANDS:
             return
         raise PolicyError(f"statement type {keyword or 'UNKNOWN'} is not permitted")
@@ -112,6 +145,20 @@ def _check_write(statement: exp.Expression, policy: Policy) -> None:
         return
 
     raise PolicyError(f"statement type {statement.key.upper()} is not permitted")
+
+
+def _explain_body(statement: exp.Command) -> str:
+    """Extract the SQL text following `EXPLAIN` (and an optional `PLAN FOR`).
+
+    sqlglot has no Drill EXPLAIN grammar, so the whole statement falls back to
+    `exp.Command`, with everything after the leading keyword left as raw,
+    unparsed text. We recurse `check()` over that text rather than trusting
+    the leading keyword alone — otherwise `EXPLAIN PLAN FOR CREATE TABLE ...`
+    would bypass the write-target allowlist entirely.
+    """
+    remainder = statement.args.get("expression")
+    text = remainder.this if isinstance(remainder, exp.Literal) else str(remainder or "")
+    return re.sub(r"^\s*PLAN\s+FOR\s+", "", text, flags=re.IGNORECASE)
 
 
 def _write_target(statement: exp.Expression) -> exp.Table | None:

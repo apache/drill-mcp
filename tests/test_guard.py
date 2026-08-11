@@ -78,6 +78,9 @@ class TestWritesAreDeniedByDefault:
             "ALTER SESSION SET `store.format` = 'json'",
             "USE dfs.tmp",
             "REFRESH TABLE METADATA dfs.tmp.foo",
+            "UPDATE dfs.tmp.foo SET a = 1",
+            "DELETE FROM dfs.tmp.foo",
+            "MERGE INTO dfs.tmp.foo USING dfs.tmp.src ON true WHEN MATCHED THEN DELETE",
         ],
     )
     def test_rejected_with_no_writable_plugins(self, sql):
@@ -144,6 +147,13 @@ class TestInjectionAttempts:
         with pytest.raises(PolicyError, match="parse"):
             check("SELECT FROM WHERE ((", CLOSED)
 
+    def test_tokenizer_failure_is_a_policy_error_not_a_crash(self):
+        # An unterminated string literal raises sqlglot's TokenError, a sibling
+        # of ParseError under SqlglotError, not a subclass of it. A guard that
+        # only catches ParseError lets this escape uncaught.
+        with pytest.raises(PolicyError, match="parse"):
+            check("SELECT * FROM t WHERE note = 'it''s", CLOSED)
+
 
 class TestMatchesPrefix:
     def test_exact_match(self):
@@ -166,3 +176,50 @@ class TestMatchesPrefix:
 
     def test_empty_entries_never_match(self):
         assert not matches_prefix("dfs.tmp", [])
+
+
+class TestEmbeddedWritesInsideReadRoots:
+    """A statement whose root node is a read type can still contain a write in
+    its subtree. Checking only the root type is not enough — the safety
+    property must not depend on Drill's parser being narrower than sqlglot's
+    Postgres dialect. Neither of these is executable Drill SQL, but the guard
+    must not rely on that.
+    """
+
+    def test_write_inside_a_cte_is_rejected(self):
+        with pytest.raises(PolicyError):
+            check(
+                "WITH x AS (INSERT INTO dfs.tmp.foo VALUES (1) RETURNING *) SELECT * FROM x",
+                CLOSED,
+            )
+
+    def test_select_into_is_rejected(self):
+        with pytest.raises(PolicyError):
+            check("SELECT * INTO dfs.tmp.newt FROM dfs.raw.src", CLOSED)
+
+
+class TestExplainRecursesIntoItsBody:
+    """EXPLAIN is not blanket-safe: sqlglot parses it as an opaque exp.Command,
+    so the guard must strip the leading EXPLAIN / EXPLAIN PLAN FOR keywords and
+    re-run the full check on what remains, rather than trusting the keyword
+    alone.
+    """
+
+    def test_explain_of_a_read_is_permitted(self):
+        check("EXPLAIN PLAN FOR SELECT * FROM dfs.tmp.t", CLOSED)
+
+    def test_explain_of_a_write_into_disallowed_plugin_is_rejected(self):
+        with pytest.raises(PolicyError):
+            check("EXPLAIN PLAN FOR CREATE TABLE s3.out AS SELECT 1", CLOSED)
+
+    def test_explain_of_a_write_into_allowed_plugin_is_permitted(self):
+        check("EXPLAIN PLAN FOR CREATE TABLE dfs.tmp.out AS SELECT 1", OPEN)
+
+    def test_explain_of_a_hidden_schema_is_rejected(self):
+        hidden = Policy(hidden_schemas=("sys",))
+        with pytest.raises(PolicyError):
+            check("EXPLAIN PLAN FOR SELECT * FROM sys.options", hidden)
+
+    def test_deeply_nested_explain_is_rejected_not_a_stack_overflow(self):
+        with pytest.raises(PolicyError):
+            check("EXPLAIN " * 10 + "SELECT 1", CLOSED)
