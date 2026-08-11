@@ -17,10 +17,13 @@
 # License.
 #
 
+import types
+
 import pytest
 import sqlglot
 from sqlglot import exp
 
+import drill_mcp.guard as guard_module
 from drill_mcp.guard import Policy, PolicyError, check, matches_prefix
 
 
@@ -242,3 +245,87 @@ class TestExplainRecursesIntoItsBody:
     def test_deeply_nested_explain_is_rejected_not_a_stack_overflow(self):
         with pytest.raises(PolicyError):
             check("EXPLAIN " * 10 + "SELECT 1", CLOSED)
+
+
+HIDDEN = Policy(hidden_schemas=("sys", "INFORMATION_SCHEMA"))
+
+
+class TestHiddenSchemas:
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT * FROM sys.options",
+            "SELECT * FROM sys.drillbits",
+            "SELECT * FROM SYS.OPTIONS",
+            "SELECT * FROM INFORMATION_SCHEMA.SCHEMATA",
+            "SELECT * FROM information_schema.columns",
+            "SELECT * FROM dfs.tmp.a JOIN sys.options ON a.k = sys.options.name",
+            "SELECT * FROM (SELECT name FROM sys.options) t",
+            "WITH o AS (SELECT * FROM sys.options) SELECT * FROM o",
+            "SELECT * FROM dfs.tmp.a UNION SELECT name, val FROM sys.options",
+            "SELECT (SELECT count(*) FROM sys.drillbits) AS n FROM dfs.tmp.a",
+        ],
+    )
+    def test_hidden_schema_references_rejected(self, sql):
+        with pytest.raises(PolicyError, match="hidden"):
+            check(sql, HIDDEN)
+
+    def test_show_tables_in_hidden_schema_rejected(self):
+        with pytest.raises(PolicyError, match="hidden"):
+            check("SHOW TABLES IN sys", HIDDEN)
+
+    def test_hidden_schema_is_a_no_op_when_unconfigured(self):
+        check("SELECT * FROM sys.options", CLOSED)
+
+    def test_non_hidden_schemas_still_permitted(self):
+        check("SELECT * FROM dfs.tmp.foo", HIDDEN)
+
+    def test_similarly_named_schema_not_blocked(self):
+        check("SELECT * FROM system_metrics.foo", HIDDEN)
+
+    def test_hidden_check_applies_to_ctas_sources(self):
+        policy = Policy(writable_plugins=("dfs.tmp",), hidden_schemas=("sys",))
+        with pytest.raises(PolicyError, match="hidden"):
+            check("CREATE TABLE dfs.tmp.out AS SELECT * FROM sys.options", policy)
+
+    def test_hidden_schema_named_in_a_string_literal_is_fine(self):
+        check("SELECT 'sys.options' AS note FROM dfs.tmp.a", HIDDEN)
+
+
+class TestCoverageGaps:
+    """Exercises branches not reached by the scenarios above, so guard.py stays
+    at 100% line coverage without weakening any other test.
+    """
+
+    def test_policy_from_config(self):
+        cfg = types.SimpleNamespace(
+            writable_plugins=["dfs.tmp"], hidden_schemas=["sys"]
+        )
+        policy = Policy.from_config(cfg)
+        assert policy.writable_plugins == ("dfs.tmp",)
+        assert policy.hidden_schemas == ("sys",)
+
+    def test_matches_prefix_empty_qualified_name(self):
+        assert not matches_prefix("", ["dfs"])
+
+    def test_explain_with_no_body_rejected(self):
+        with pytest.raises(PolicyError, match="no statement body"):
+            check("EXPLAIN", CLOSED)
+
+    def test_create_of_unsupported_kind_rejected(self):
+        with pytest.raises(PolicyError, match="not permitted"):
+            check("CREATE SCHEMA foo", CLOSED)
+
+    def test_ctas_with_explicit_column_list_permitted(self):
+        # The parenthesized column list wraps the target table in an
+        # exp.Schema node; _write_target must unwrap it to find the table.
+        check("CREATE TABLE dfs.tmp.out (a INT) AS SELECT 1", OPEN)
+
+    def test_create_with_no_resolvable_target_rejected(self):
+        # Not reachable through any SQL text sqlglot will actually parse into
+        # a Create/Drop with kind TABLE/VIEW: sqlglot always populates `this`
+        # in that case. Exercised directly against the private function to
+        # cover the defensive branch.
+        stmt = exp.Create(kind="TABLE")
+        with pytest.raises(PolicyError, match="could not determine the target"):
+            guard_module._check_write(stmt, OPEN, 0)
