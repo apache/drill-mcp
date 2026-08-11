@@ -1458,7 +1458,7 @@ Add this import near the top of `drill_mcp/client_rest.py`:
 from .redact import redact
 ```
 
-Add a query-id validator beside `quote_identifier`:
+Add a query-id validator beside `quote_literal`:
 
 ```python
 _QUERY_ID = re.compile(r"^[A-Za-z0-9-]+$")
