@@ -17,6 +17,9 @@
 # License.
 #
 
+import sys
+import types
+
 import httpx
 import pytest
 import respx
@@ -46,7 +49,17 @@ class TestQuoting:
 
     @pytest.mark.parametrize(
         "bad",
-        ["foo'bar", "foo;DROP", "foo bar", "foo\nbar", "", "foo\\bar", "foo`bar", "dfs.tmp"],
+        [
+            "foo'bar",
+            "foo;DROP",
+            "foo bar",
+            "foo\nbar",
+            "",
+            "foo\\bar",
+            "foo`bar",
+            "dfs.tmp",
+            "foo\n",  # trailing newline: `$` matches before it under .match(), not under .fullmatch()
+        ],
     )
     def test_literal_rejects_dangerous_input(self, bad):
         with pytest.raises(DrillError, match="invalid identifier"):
@@ -54,7 +67,17 @@ class TestQuoting:
 
     @pytest.mark.parametrize(
         "bad",
-        ["foo'bar", "foo;DROP", "foo bar", "foo\nbar", "", "..", "foo\\bar", "foo`bar"],
+        [
+            "foo'bar",
+            "foo;DROP",
+            "foo bar",
+            "foo\nbar",
+            "",
+            "..",
+            "foo\\bar",
+            "foo`bar",
+            "dfs.tmp\n",  # trailing newline on the last segment
+        ],
     )
     def test_literal_path_rejects_dangerous_input(self, bad):
         with pytest.raises(DrillError, match="invalid identifier"):
@@ -87,6 +110,24 @@ class TestQuery:
             )
         )
         assert make_client().query("SELECT 1", max_rows=2).truncated is True
+
+    @respx.mock
+    def test_not_truncated_when_max_rows_is_zero(self):
+        # 0 >= 0 would be a false "truncated" without the max_rows > 0 guard.
+        respx.post(f"{BASE}/query.json").mock(
+            return_value=httpx.Response(200, json={"columns": [], "rows": []})
+        )
+        assert make_client().query("SELECT 1", max_rows=0).truncated is False
+
+    @respx.mock
+    def test_non_json_response_is_reported_as_drill_error(self):
+        # A 200 HTML page (e.g. from an SSO gateway or an undetected auth
+        # failure in front of Drill) must not surface a bare JSONDecodeError.
+        respx.post(f"{BASE}/query.json").mock(
+            return_value=httpx.Response(200, text="<html><body>not json</body></html>")
+        )
+        with pytest.raises(DrillError, match="non-JSON"):
+            make_client().query("SELECT 1", max_rows=10)
 
     @respx.mock
     def test_drill_error_text_is_surfaced(self):
@@ -153,10 +194,15 @@ class TestBasicAuth:
 
     @respx.mock
     def test_gives_up_after_one_retry(self):
-        respx.post(f"{BASE}/j_security_check").mock(return_value=httpx.Response(200))
-        respx.post(f"{BASE}/query.json").mock(return_value=httpx.Response(401))
+        login = respx.post(f"{BASE}/j_security_check").mock(return_value=httpx.Response(200))
+        query = respx.post(f"{BASE}/query.json").mock(return_value=httpx.Response(401))
         with pytest.raises(DrillError, match="authentication"):
             make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+        # Without bounded call counts, an unbounded retry loop would hang
+        # instead of failing -- these assertions are what actually prove the
+        # retry is bounded to exactly one attempt.
+        assert login.call_count == 2
+        assert query.call_count == 2
 
     @respx.mock
     def test_login_failure_is_reported(self):
@@ -169,11 +215,33 @@ class TestBasicAuth:
         """Drill's j_security_check returns HTTP 200 even on a wrong password;
         the failure is only visible in the HTML error page body. This is the
         regression test: without checking the body, a wrong password is
-        silently treated as a successful login."""
+        silently treated as a successful login.
+
+        Deliberately no /query.json mock is registered: if login wrongly
+        succeeds, the client proceeds to query() and respx raises
+        AllMockedAssertionError instead of DrillError, failing this test.
+        That's what makes this test non-vacuous -- do not add a query mock
+        here, it would silently hollow out the regression coverage.
+        """
         respx.post(f"{BASE}/j_security_check").mock(
             return_value=httpx.Response(
                 200,
                 text="<html><body>Invalid username/password credentials</body></html>",
+            )
+        )
+        with pytest.raises(DrillError, match="authentication") as exc:
+            make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+        assert "s3cret" not in str(exc.value)
+
+    @respx.mock
+    def test_login_rejects_200_with_tags_inside_the_marker_phrase(self):
+        """The invalid-credentials marker can arrive with HTML tags inside the
+        phrase itself (e.g. a <br> mid-sentence), not just surrounding it.
+        Matching against the raw markup would miss this."""
+        respx.post(f"{BASE}/j_security_check").mock(
+            return_value=httpx.Response(
+                200,
+                text="<html><body>Invalid<br>username/password credentials</body></html>",
             )
         )
         with pytest.raises(DrillError, match="authentication") as exc:
@@ -221,3 +289,29 @@ class TestBasicAuth:
         )
         make_client().query("SELECT 1", max_rows=1)
         assert not login.called
+
+
+class TestClose:
+    def test_close_closes_the_underlying_http_client(self):
+        client = make_client()
+        assert client._http.is_closed is False
+        client.close()
+        assert client._http.is_closed is True
+
+
+class TestKerberosAuth:
+    def test_missing_extra_raises_a_clear_error(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "httpx_gssapi", None)
+        with pytest.raises(DrillError, match=r"drill-mcp\[kerberos\]"):
+            make_client(auth="kerberos")
+
+    def test_extra_present_wires_the_auth_object_into_the_http_client(self, monkeypatch):
+        class _FakeSpnegoAuth(httpx.Auth):
+            def auth_flow(self, request):
+                yield request
+
+        sentinel = _FakeSpnegoAuth()
+        stub = types.SimpleNamespace(HTTPSPNEGOAuth=lambda: sentinel)
+        monkeypatch.setitem(sys.modules, "httpx_gssapi", stub)
+        client = make_client(auth="kerberos")
+        assert client._http.auth is sentinel

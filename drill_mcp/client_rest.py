@@ -49,9 +49,16 @@ _IDENTIFIER = re.compile(r"^[A-Za-z0-9_$-]+$")
 
 # Drill's j_security_check returns HTTP 200 even on a wrong password; the only
 # signal is this marker string inside the HTML error page body. Matched
-# case-insensitively, with flexible whitespace, since it arrives embedded in
-# markup rather than as the whole body.
+# case-insensitively, with flexible whitespace, against the body with HTML
+# tags stripped first -- the marker can arrive with tags inside the phrase
+# (e.g. "Invalid<br>username/password credentials"), which a plain regex
+# search against the raw markup would miss.
 _INVALID_CREDENTIALS = re.compile(r"invalid\s+username\s*/\s*password\s+credentials", re.IGNORECASE)
+_HTML_TAG = re.compile(r"<[^>]+>")
+
+
+def _strip_tags(html: str) -> str:
+    return _HTML_TAG.sub(" ", html)
 
 
 class DrillError(Exception):
@@ -74,7 +81,7 @@ def quote_literal(value: str) -> str:
     parameters, so anything outside the safe character set is rejected rather
     than escaped.
     """
-    if not _IDENTIFIER.match(value):
+    if not _IDENTIFIER.fullmatch(value):
         raise DrillError(f"invalid identifier: {value!r}")
     return f"'{value}'"
 
@@ -82,9 +89,26 @@ def quote_literal(value: str) -> str:
 def quote_literal_path(value: str) -> str:
     """Same as `quote_literal`, but permits a dotted schema path like `dfs.tmp`."""
     parts = value.split(".")
-    if not parts or any(not _IDENTIFIER.match(part) for part in parts):
+    if any(not _IDENTIFIER.fullmatch(part) for part in parts):
         raise DrillError(f"invalid identifier: {value!r}")
     return f"'{value}'"
+
+
+def _error_text(response: httpx.Response) -> str:
+    """Drill's own error text is what a model needs to fix its SQL. Truncate it."""
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    message = ""
+    if isinstance(payload, dict):
+        message = payload.get("errorMessage") or payload.get("message") or ""
+    if not message:
+        message = response.text
+    message = " ".join(message.split())
+    if len(message) > 2000:
+        message = message[:2000] + " ... [truncated]"
+    return message or f"Drill returned HTTP {response.status_code}"
 
 
 # -- client --------------------------------------------------------------
@@ -98,7 +122,7 @@ class RestClient:
         if config.auth == "kerberos":
             try:
                 from httpx_gssapi import HTTPSPNEGOAuth
-            except ImportError as exc:  # pragma: no cover - exercised in Task 7 style
+            except ImportError as exc:
                 raise DrillError(
                     "auth: kerberos requires the kerberos extra: pip install drill-mcp[kerberos]"
                 ) from exc
@@ -143,7 +167,7 @@ class RestClient:
                 f"authentication endpoint at {self._config.url} returned "
                 f"HTTP {response.status_code}"
             )
-        if _INVALID_CREDENTIALS.search(response.text):
+        if _INVALID_CREDENTIALS.search(_strip_tags(response.text)):
             raise DrillError(
                 f"authentication failed for user {self._config.user!r} at {self._config.url}"
             )
@@ -189,28 +213,16 @@ class RestClient:
             "/query.json",
             json={"queryType": "SQL", "query": sql, "autoLimit": max_rows},
         )
-        payload = response.json()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise DrillError(
+                f"Drill at {self._config.url} returned a non-JSON response"
+            ) from exc
         rows = payload.get("rows") or []
         return QueryResult(
             columns=payload.get("columns") or [],
             rows=rows,
             query_id=payload.get("queryId"),
-            truncated=len(rows) >= max_rows,
+            truncated=max_rows > 0 and len(rows) >= max_rows,
         )
-
-
-def _error_text(response: httpx.Response) -> str:
-    """Drill's own error text is what a model needs to fix its SQL. Truncate it."""
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = None
-    message = ""
-    if isinstance(payload, dict):
-        message = payload.get("errorMessage") or payload.get("message") or ""
-    if not message:
-        message = response.text
-    message = " ".join(message.split())
-    if len(message) > 2000:
-        message = message[:2000] + " ... [truncated]"
-    return message or f"Drill returned HTTP {response.status_code}"
