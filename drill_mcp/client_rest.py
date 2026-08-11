@@ -47,6 +47,12 @@ from .config import Config
 # segments) is rejected too.
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_$-]+$")
 
+# Drill's j_security_check returns HTTP 200 even on a wrong password; the only
+# signal is this marker string inside the HTML error page body. Matched
+# case-insensitively, with flexible whitespace, since it arrives embedded in
+# markup rather than as the whole body.
+_INVALID_CREDENTIALS = re.compile(r"invalid\s+username\s*/\s*password\s+credentials", re.IGNORECASE)
+
 
 class DrillError(Exception):
     """Any failure talking to Drill: connection, auth, or query error."""
@@ -124,12 +130,20 @@ class RestClient:
         except httpx.HTTPError as exc:
             raise self._transport_error(exc) from exc
         # Drill's j_security_check endpoint (standard Java EE FORM auth) returns
-        # 200 for both outcomes when no redirect target is configured; failure
-        # is not reliably distinguishable by URL shape (an unredirected success
-        # response's URL also still points at "/j_security_check", so that
-        # check is vacuous at best and a false positive at worst). Status code
-        # is the only signal we can trust here.
+        # HTTP 200 with an HTML error page in the body when credentials are
+        # wrong -- it does NOT use a 4xx status for a bad password. So status
+        # code alone cannot detect an authentication failure; a non-2xx here
+        # means the endpoint itself is unreachable/misbehaving (a connection
+        # problem), while a wrong password must be detected from the body.
+        # (Checking the response URL, as an earlier draft did, is also wrong:
+        # an unredirected *successful* login's URL still points at
+        # "/j_security_check", so that check false-positives on success.)
         if response.status_code >= 400:
+            raise DrillError(
+                f"authentication endpoint at {self._config.url} returned "
+                f"HTTP {response.status_code}"
+            )
+        if _INVALID_CREDENTIALS.search(response.text):
             raise DrillError(
                 f"authentication failed for user {self._config.user!r} at {self._config.url}"
             )

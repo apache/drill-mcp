@@ -165,6 +165,55 @@ class TestBasicAuth:
             make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
 
     @respx.mock
+    def test_login_rejects_200_with_invalid_credentials_body(self):
+        """Drill's j_security_check returns HTTP 200 even on a wrong password;
+        the failure is only visible in the HTML error page body. This is the
+        regression test: without checking the body, a wrong password is
+        silently treated as a successful login."""
+        respx.post(f"{BASE}/j_security_check").mock(
+            return_value=httpx.Response(
+                200,
+                text="<html><body>Invalid username/password credentials</body></html>",
+            )
+        )
+        with pytest.raises(DrillError, match="authentication") as exc:
+            make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+        assert "s3cret" not in str(exc.value)
+
+    @respx.mock
+    def test_login_succeeds_on_200_with_ordinary_body(self):
+        login = respx.post(f"{BASE}/j_security_check").mock(
+            return_value=httpx.Response(200, text="<html><body>Welcome</body></html>")
+        )
+        respx.post(f"{BASE}/query.json").mock(
+            return_value=httpx.Response(200, json={"columns": ["a"], "rows": []})
+        )
+        result = make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+        assert login.called
+        assert result.columns == ["a"]
+
+    @respx.mock
+    def test_reauth_fails_closed_on_invalid_credentials_not_looping(self):
+        """A 401 mid-session triggers one re-login; if that re-login also
+        reports invalid credentials, the client must fail closed rather than
+        retry the query or loop."""
+        login = respx.post(f"{BASE}/j_security_check").mock(
+            side_effect=[
+                httpx.Response(200, text="<html>Welcome</html>"),
+                httpx.Response(
+                    200,
+                    text="<html>Invalid username/password credentials</html>",
+                ),
+            ]
+        )
+        query = respx.post(f"{BASE}/query.json").mock(return_value=httpx.Response(401))
+        with pytest.raises(DrillError, match="authentication") as exc:
+            make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+        assert "s3cret" not in str(exc.value)
+        assert login.call_count == 2
+        assert query.call_count == 1
+
+    @respx.mock
     def test_no_login_when_auth_is_none(self):
         login = respx.post(f"{BASE}/j_security_check").mock(return_value=httpx.Response(200))
         respx.post(f"{BASE}/query.json").mock(
