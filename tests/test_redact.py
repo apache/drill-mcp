@@ -142,3 +142,23 @@ def test_passes_through_tuples():
     result = redact(source)
     assert isinstance(result, tuple)
     assert result[0]["password"] == REDACTED
+
+
+def test_redacts_session_key_camelcase():
+    source = {"sessionKey": "session-value"}
+    assert redact(source)["sessionKey"] == REDACTED
+
+
+def test_redacts_session_key_snake_case():
+    source = {"session_key": "session-value"}
+    assert redact(source)["session_key"] == REDACTED
+
+
+def test_redacts_session_key_kebab_case():
+    source = {"session-key": "session-value"}
+    assert redact(source)["session-key"] == REDACTED
+
+
+def test_redacts_session_key_header():
+    source = {"X-Session-Key": "session-value"}
+    assert redact(source)["X-Session-Key"] == REDACTED
