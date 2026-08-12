@@ -139,7 +139,9 @@ def test_redacts_credentials_b64():
 
 
 def test_redacts_credentials_provider_type():
-    source = {"credentialsProviderType": "com.amazonaws.auth.DefaultAWSCredentialsProviderChain"}
+    source = {
+        "credentialsProviderType": "com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
+    }
     assert redact(source)["credentialsProviderType"] == REDACTED
 
 

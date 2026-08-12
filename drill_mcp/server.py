@@ -95,7 +95,9 @@ class DrillTools:
         query_text = str(profile.get("query") or "").lower()
         if not query_text:
             return False
-        return any(schema.lower() in query_text for schema in self._policy.hidden_schemas)
+        return any(
+            schema.lower() in query_text for schema in self._policy.hidden_schemas
+        )
 
     def _visible(self, schema: str | None) -> bool:
         # Fail closed, not open: an item this function cannot identify (no
@@ -127,7 +129,9 @@ class DrillTools:
             # an unexpected exception's text is exactly what might carry a
             # path or internal detail; `from exc` keeps it for a developer
             # without surfacing it to the model.
-            raise ToolError("could not check this SQL against policy; rejecting") from exc
+            raise ToolError(
+                "could not check this SQL against policy; rejecting"
+            ) from exc
 
         limit = self._effective_max_rows(max_rows)
         try:
@@ -210,7 +214,9 @@ class DrillTools:
             plugins = self._require_management("storage_plugins")()
         except DrillError as exc:
             raise ToolError(str(exc)) from exc
-        return [p for p in plugins if isinstance(p, dict) and self._visible(p.get("name"))]
+        return [
+            p for p in plugins if isinstance(p, dict) and self._visible(p.get("name"))
+        ]
 
     def cluster_status(self) -> dict[str, Any]:
         """Report Drillbit membership and overall cluster status."""
@@ -291,7 +297,9 @@ def build_server(config: Config) -> MCPServer:
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="drill-mcp", description="MCP server for Apache Drill")
+    parser = argparse.ArgumentParser(
+        prog="drill-mcp", description="MCP server for Apache Drill"
+    )
     parser.add_argument("--config", help="path to a YAML config file")
     parser.add_argument("--url", help="Drill HTTP endpoint, e.g. http://localhost:8047")
     parser.add_argument("--backend", choices=["rest", "jdbc"])
@@ -328,7 +336,9 @@ def main(argv: list[str] | None = None) -> int:
 
     args = _parse_args(argv)
     overrides = {
-        key: value for key, value in vars(args).items() if key != "config" and value is not None
+        key: value
+        for key, value in vars(args).items()
+        if key != "config" and value is not None
     }
     try:
         config = load_config(args.config, overrides=overrides)

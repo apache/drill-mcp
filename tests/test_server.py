@@ -53,7 +53,9 @@ class TestRunQuery:
         # is the last chokepoint before the model, so it must not simply
         # trust whatever the client hands back.
         client = MagicMock()
-        client.query.return_value = QueryResult(["a"], [{"a": i} for i in range(10)], "q1", False)
+        client.query.return_value = QueryResult(
+            ["a"], [{"a": i} for i in range(10)], "q1", False
+        )
         result = make_tools(client, max_rows=3).run_query("SELECT 1")
         assert len(result["rows"]) == 3
         assert result["rows"] == [{"a": 0}, {"a": 1}, {"a": 2}]
@@ -94,7 +96,9 @@ class TestRunQuery:
     def test_hidden_schema_is_rejected_before_reaching_the_client(self):
         client = MagicMock()
         with pytest.raises(ToolError, match="hidden"):
-            make_tools(client, hidden_schemas=["sys"]).run_query("SELECT * FROM sys.options")
+            make_tools(client, hidden_schemas=["sys"]).run_query(
+                "SELECT * FROM sys.options"
+            )
         client.query.assert_not_called()
 
     def test_drill_errors_are_surfaced_as_tool_errors(self):
@@ -103,7 +107,9 @@ class TestRunQuery:
         with pytest.raises(ToolError, match="no such table"):
             make_tools(client).run_query("SELECT * FROM nope")
 
-    def test_pathological_sql_that_crashes_the_parser_is_rejected_without_a_traceback(self):
+    def test_pathological_sql_that_crashes_the_parser_is_rejected_without_a_traceback(
+        self,
+    ):
         client = MagicMock()
         deeply_nested = "SELECT " + "(" * 400 + "1" + ")" * 400
         with pytest.raises(ToolError) as excinfo:
@@ -140,7 +146,9 @@ class TestListSchemas:
             {"name": "sys"},
             {"name": "INFORMATION_SCHEMA"},
         ]
-        result = make_tools(client, hidden_schemas=["sys", "INFORMATION_SCHEMA"]).list_schemas()
+        result = make_tools(
+            client, hidden_schemas=["sys", "INFORMATION_SCHEMA"]
+        ).list_schemas()
         assert [s["name"] for s in result] == ["dfs.tmp"]
 
     def test_filtering_is_case_insensitive(self):
@@ -160,7 +168,9 @@ class TestListTables:
     def test_lists_tables(self):
         client = MagicMock()
         client.tables.return_value = [{"name": "t", "type": "TABLE"}]
-        assert make_tools(client).list_tables("dfs.tmp") == [{"name": "t", "type": "TABLE"}]
+        assert make_tools(client).list_tables("dfs.tmp") == [
+            {"name": "t", "type": "TABLE"}
+        ]
         client.tables.assert_called_once_with("dfs.tmp")
 
     def test_hidden_schema_is_refused(self):
@@ -180,7 +190,9 @@ class TestListTables:
 class TestDescribeTable:
     def test_describes_columns(self):
         client = MagicMock()
-        client.columns.return_value = [{"name": "id", "data_type": "INTEGER", "nullable": True}]
+        client.columns.return_value = [
+            {"name": "id", "data_type": "INTEGER", "nullable": True}
+        ]
         assert make_tools(client).describe_table("dfs.tmp", "t")[0]["name"] == "id"
         client.columns.assert_called_once_with("dfs.tmp", "t")
 
@@ -251,7 +263,10 @@ class TestManagementTools:
         # which is exactly the enumeration path the guard and hidden-schema
         # filtering elsewhere were built to close.
         client = MagicMock()
-        client.profile.return_value = {"queryId": "abc", "query": "SELECT * FROM sys.options"}
+        client.profile.return_value = {
+            "queryId": "abc",
+            "query": "SELECT * FROM sys.options",
+        }
         with pytest.raises(ToolError, match="hidden"):
             make_tools(client, hidden_schemas=["sys"]).get_profile("abc")
 
@@ -371,7 +386,9 @@ class TestShowFiltering:
 
     def test_ordinary_select_rows_are_not_filtered(self):
         client = MagicMock()
-        client.query.return_value = QueryResult(["SCHEMA_NAME"], [{"SCHEMA_NAME": "sys"}])
+        client.query.return_value = QueryResult(
+            ["SCHEMA_NAME"], [{"SCHEMA_NAME": "sys"}]
+        )
         result = make_tools(client, hidden_schemas=["sys"]).run_query(
             "SELECT SCHEMA_NAME FROM dfs.tmp.notes"
         )
@@ -379,7 +396,9 @@ class TestShowFiltering:
 
     def test_show_filtering_is_a_no_op_without_hidden_schemas(self):
         client = MagicMock()
-        client.query.return_value = QueryResult(["SCHEMA_NAME"], [{"SCHEMA_NAME": "sys"}])
+        client.query.return_value = QueryResult(
+            ["SCHEMA_NAME"], [{"SCHEMA_NAME": "sys"}]
+        )
         result = make_tools(client).run_query("SHOW SCHEMAS")
         assert result["rows"] == [{"SCHEMA_NAME": "sys"}]
 
@@ -392,7 +411,9 @@ class TestShowFiltering:
             ["SCHEMA_NAME"],
             [{"SCHEMA_NAME": "sys"}, {"SCHEMA_NAME": "dfs.tmp"}],
         )
-        result = make_tools(client, hidden_schemas=["sys"]).run_query("/* x */ SHOW SCHEMAS")
+        result = make_tools(client, hidden_schemas=["sys"]).run_query(
+            "/* x */ SHOW SCHEMAS"
+        )
         assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
 
     def test_show_databases_with_leading_line_comment_is_still_filtered(self):
@@ -445,7 +466,9 @@ class TestShowFiltering:
         client.query.return_value = QueryResult(
             ["TABLE_NAME"], [{"TABLE_NAME": "sys"}, {"TABLE_NAME": "orders"}]
         )
-        result = make_tools(client, hidden_schemas=["sys"]).run_query("SHOW TABLES LIKE '%s%'")
+        result = make_tools(client, hidden_schemas=["sys"]).run_query(
+            "SHOW TABLES LIKE '%s%'"
+        )
         assert result["rows"] == [{"TABLE_NAME": "orders"}]
 
     def test_show_schemas_like_rows_are_filtered(self):
@@ -460,7 +483,9 @@ class TestShowFiltering:
             ["SCHEMA_NAME"],
             [{"SCHEMA_NAME": "sys"}, {"SCHEMA_NAME": "dfs.tmp"}],
         )
-        result = make_tools(client, hidden_schemas=["sys"]).run_query("SHOW SCHEMAS LIKE '%s%'")
+        result = make_tools(client, hidden_schemas=["sys"]).run_query(
+            "SHOW SCHEMAS LIKE '%s%'"
+        )
         assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
 
     def test_show_databases_like_rows_are_filtered(self):
@@ -480,7 +505,9 @@ class TestShowFiltering:
             ["SCHEMA_NAME"],
             [{"SCHEMA_NAME": "sys"}, {"SCHEMA_NAME": "dfs.tmp"}],
         )
-        result = make_tools(client, hidden_schemas=["sys"]).run_query("SHOW SCHEMAS /* trailing */")
+        result = make_tools(client, hidden_schemas=["sys"]).run_query(
+            "SHOW SCHEMAS /* trailing */"
+        )
         assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
 
     def test_show_schemas_with_no_whitespace_before_comment_is_still_filtered(self):
@@ -576,7 +603,9 @@ class TestWiring:
         assert isinstance(build_client(load_config(env={})), RestClient)
 
     def test_jdbc_backend_builds_a_jdbc_client(self):
-        cfg = load_config(overrides={"backend": "jdbc", "jdbc_driver_path": "/x.jar"}, env={})
+        cfg = load_config(
+            overrides={"backend": "jdbc", "jdbc_driver_path": "/x.jar"}, env={}
+        )
         assert isinstance(build_client(cfg), JdbcClient)
 
     def test_all_tools_are_registered(self):
@@ -613,7 +642,15 @@ class TestWiring:
     def test_no_registered_tool_accepts_a_credential_argument(self):
         """Credentials come from config or environment only, never a tool argument."""
         server = build_server(load_config(env={}))
-        credential_words = {"user", "password", "username", "passwd", "secret", "token", "credential"}
+        credential_words = {
+            "user",
+            "password",
+            "username",
+            "passwd",
+            "secret",
+            "token",
+            "credential",
+        }
         for tool in server._tool_manager.list_tools():
             params = set(tool.parameters.get("properties", {}))
             assert not (params & credential_words), (

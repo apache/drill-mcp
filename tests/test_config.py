@@ -36,7 +36,9 @@ def test_defaults_are_conservative():
 
 def test_loads_from_yaml_file(tmp_path):
     path = tmp_path / "drill.yaml"
-    path.write_text("url: http://drill:8047\nmax_rows: 50\nwritable_plugins: [dfs.tmp]\n")
+    path.write_text(
+        "url: http://drill:8047\nmax_rows: 50\nwritable_plugins: [dfs.tmp]\n"
+    )
     cfg = load_config(str(path), env={})
     assert cfg.url == "http://drill:8047"
     assert cfg.max_rows == 50

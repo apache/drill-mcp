@@ -93,7 +93,9 @@ def load_config(
         except yaml.YAMLError as exc:
             raise ConfigError(f"config file is not valid YAML: {exc}") from exc
         if not isinstance(loaded, dict):
-            raise ConfigError("config file must contain a YAML mapping at the top level")
+            raise ConfigError(
+                "config file must contain a YAML mapping at the top level"
+            )
         values.update(loaded)
 
     for env_key, field in _ENV_MAP.items():
@@ -118,7 +120,9 @@ def load_config(
         # pydantic reports as `input_value=12345`). That must never reach
         # stderr or a log. Rebuild the message from `loc`/`msg` only.
         details = "; ".join(
-            f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}" if err["loc"] else err["msg"]
+            f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}"
+            if err["loc"]
+            else err["msg"]
             for err in exc.errors()
         )
         raise ConfigError(details) from exc

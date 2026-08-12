@@ -117,7 +117,9 @@ class JdbcClient:
                 "the JDBC backend requires the jdbc extra: pip install drill-mcp[jdbc]"
             ) from exc
         credentials = (
-            [self._config.user, self._config.password] if self._config.auth == "basic" else []
+            [self._config.user, self._config.password]
+            if self._config.auth == "basic"
+            else []
         )
         try:
             self._connection = jaydebeapi.connect(
