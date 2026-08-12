@@ -127,6 +127,28 @@ def quote_identifier_path(value: str) -> str:
     return ".".join(f"`{part}`" for part in parts)
 
 
+# `_IDENTIFIER` plus a literal ".", for filenames like "sales.csv" that are ONE
+# identifier, not a dotted path -- see `quote_identifier`. Still excludes
+# backticks: a backtick in the value would break out of the quoting below,
+# which is the entire trust boundary this regex exists to enforce.
+_FILE_IDENTIFIER = re.compile(r"[A-Za-z0-9_$.-]+")
+
+
+def quote_identifier(value: str) -> str:
+    """Quote a single identifier that may itself contain dots, e.g. a filename.
+
+    `sales.csv` is one identifier, not a two-part path: a dotted filename must
+    stay inside a single backtick pair, or Drill reads the extension as the
+    table name and the stem as part of the schema (see
+    sqlalchemy_drill.base.DrillIdentifierPreparer.format_drill_table, which
+    quotes plugin.`workspace`.`file.ext` the same way). Reject rather than
+    escape -- same trust boundary as `quote_identifier_path`.
+    """
+    if not _FILE_IDENTIFIER.fullmatch(value):
+        raise DrillError(f"invalid identifier: {value!r}")
+    return f"`{value}`"
+
+
 _QUERY_ID = re.compile(r"[A-Za-z0-9-]+")
 
 
@@ -330,9 +352,10 @@ class RestClient:
     def columns(self, schema: str, table: str) -> list[dict[str, Any]]:
         # Validate the table name up front, before the plugin_type lookup fires
         # a query: an invalid table name should never make it to the network.
-        # File-plugin table names are filenames and may contain a literal "."
-        # (e.g. "sales.csv"), so validate segment-by-segment like a dotted path.
-        if any(not _IDENTIFIER.fullmatch(part) for part in table.split(".")):
+        # `_FILE_IDENTIFIER` (not `_IDENTIFIER`) because file-plugin table
+        # names are filenames and may contain a literal "." (e.g. "sales.csv")
+        # as ONE identifier -- see `quote_identifier`.
+        if not _FILE_IDENTIFIER.fullmatch(table):
             raise DrillError(f"invalid identifier: {table!r}")
 
         # Same split: file plugins have dynamic schemas and no
@@ -340,10 +363,12 @@ class RestClient:
         # deliberately NOT a `SELECT * ... LIMIT 1` probe, which would read user
         # data to answer a metadata question.
         if self.plugin_type(schema) == "file":
-            result = self.query(
-                f"DESCRIBE {quote_identifier_path(schema + '.' + table)}",
-                max_rows=10_000,
-            )
+            # `table` is ONE identifier (a filename), not a further dotted
+            # path -- quote it with `quote_identifier`, not
+            # `quote_identifier_path`, or "sales.csv" would be split into a
+            # schema segment "sales" and a table segment "csv".
+            target = f"{quote_identifier_path(schema)}.{quote_identifier(table)}"
+            result = self.query(f"DESCRIBE {target}", max_rows=10_000)
             return [
                 {
                     "name": row.get("COLUMN_NAME"),

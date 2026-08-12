@@ -486,9 +486,52 @@ class TestFilePluginMetadata:
         ]
         body = route.calls[1].request.read()
         assert b"DESCRIBE" in body
+        # The filename is ONE identifier, not a further dotted path: it must
+        # stay inside a single backtick pair, or Drill reads the extension as
+        # the table name and the stem as part of the schema.
+        assert b"`sales.csv`" in body
+        assert b"`sales`.`csv`" not in body
         # Metadata-only: never read user rows to answer a metadata question.
         assert b"LIMIT 1" not in body
         assert b"SELECT *" not in body
+
+    @respx.mock
+    def test_columns_keeps_a_multi_dot_filename_in_one_backtick_pair(self):
+        route = respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("file"),
+                query_response(
+                    ["COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE"],
+                    [{"COLUMN_NAME": "id", "DATA_TYPE": "BIGINT", "IS_NULLABLE": "YES"}],
+                ),
+            ]
+        )
+        make_client().columns("dfs.tmp", "archive.2024.json")
+        body = route.calls[1].request.read()
+        assert b"`archive.2024.json`" in body
+
+    @respx.mock
+    def test_columns_works_for_a_file_with_no_extension(self):
+        route = respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("file"),
+                query_response(
+                    ["COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE"],
+                    [{"COLUMN_NAME": "id", "DATA_TYPE": "BIGINT", "IS_NULLABLE": "YES"}],
+                ),
+            ]
+        )
+        assert make_client().columns("dfs.tmp", "README") == [
+            {"name": "id", "data_type": "BIGINT", "nullable": True}
+        ]
+        assert b"`README`" in route.calls[1].request.read()
+
+    @respx.mock
+    def test_columns_rejects_a_backtick_in_the_table_name(self):
+        route = respx.post(f"{BASE}/query.json").mock(return_value=self._schemata("file"))
+        with pytest.raises(DrillError, match="invalid identifier"):
+            make_client().columns("dfs.tmp", "sales`; DROP TABLE x --.csv")
+        assert not route.called
 
     @respx.mock
     def test_columns_uses_information_schema_for_a_non_file_plugin(self):
