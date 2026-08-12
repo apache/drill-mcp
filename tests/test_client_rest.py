@@ -39,7 +39,7 @@ BASE = "http://drill:8047"
 
 def make_client(**overrides):
     overrides.setdefault("url", BASE)
-    return RestClient(load_config(overrides=overrides))
+    return RestClient(load_config(overrides=overrides, env={}))
 
 
 class TestQuoting:

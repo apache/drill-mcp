@@ -29,7 +29,7 @@ from drill_mcp.server import DrillTools, ToolError, build_client, build_server
 
 def make_tools(client=None, **overrides):
     client = client or MagicMock()
-    return DrillTools(load_config(overrides=overrides), client)
+    return DrillTools(load_config(overrides=overrides, env={}), client)
 
 
 class TestRunQuery:
@@ -577,14 +577,14 @@ class TestShowFiltering:
 
 class TestWiring:
     def test_rest_backend_builds_a_rest_client(self):
-        assert isinstance(build_client(load_config()), RestClient)
+        assert isinstance(build_client(load_config(env={})), RestClient)
 
     def test_jdbc_backend_builds_a_jdbc_client(self):
-        cfg = load_config(overrides={"backend": "jdbc", "jdbc_driver_path": "/x.jar"})
+        cfg = load_config(overrides={"backend": "jdbc", "jdbc_driver_path": "/x.jar"}, env={})
         assert isinstance(build_client(cfg), JdbcClient)
 
     def test_all_tools_are_registered(self):
-        server = build_server(load_config())
+        server = build_server(load_config(env={}))
         names = {tool.name for tool in server._tool_manager.list_tools()}
         assert names == {
             "run_query",
@@ -599,11 +599,11 @@ class TestWiring:
         }
 
     def test_every_tool_has_a_description(self):
-        server = build_server(load_config())
+        server = build_server(load_config(env={}))
         assert all(tool.description for tool in server._tool_manager.list_tools())
 
     def test_no_write_or_mutation_tools_are_registered(self):
-        server = build_server(load_config())
+        server = build_server(load_config(env={}))
         names = {tool.name for tool in server._tool_manager.list_tools()}
         forbidden = {"create_storage_plugin", "update_storage_plugin",
                      "delete_storage_plugin", "set_option", "alter_system"}
@@ -611,7 +611,7 @@ class TestWiring:
 
     def test_no_registered_tool_accepts_a_credential_argument(self):
         """Credentials come from config or environment only, never a tool argument."""
-        server = build_server(load_config())
+        server = build_server(load_config(env={}))
         credential_words = {"user", "password", "username", "passwd", "secret", "token", "credential"}
         for tool in server._tool_manager.list_tools():
             params = set(tool.parameters.get("properties", {}))
