@@ -107,3 +107,14 @@ def test_config_is_immutable():
     cfg = load_config(env={})
     with pytest.raises(ValidationError, match="frozen"):
         cfg.url = "http://elsewhere:8047"
+
+
+def test_a_non_string_password_does_not_appear_in_the_error_message():
+    # pydantic's default ValidationError text embeds `input_value=...` for
+    # every error -- e.g. an unquoted `password: 12345` in YAML produces
+    # "input_value=12345" verbatim. ConfigError must not echo that: `main()`
+    # prints it to stderr, and any log capturing stderr would then carry the
+    # (would-be) password in plaintext.
+    with pytest.raises(ConfigError) as exc:
+        load_config(env={}, overrides={"password": 12345})
+    assert "12345" not in str(exc.value)

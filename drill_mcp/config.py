@@ -112,4 +112,13 @@ def load_config(
     try:
         return Config(**values)
     except ValidationError as exc:
-        raise ConfigError(str(exc)) from exc
+        # `str(exc)` embeds pydantic's `input_value=...` for every error,
+        # which echoes the offending config value verbatim -- including a
+        # password typed unquoted in YAML (e.g. `password: 12345`, which
+        # pydantic reports as `input_value=12345`). That must never reach
+        # stderr or a log. Rebuild the message from `loc`/`msg` only.
+        details = "; ".join(
+            f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}" if err["loc"] else err["msg"]
+            for err in exc.errors()
+        )
+        raise ConfigError(details) from exc
