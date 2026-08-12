@@ -376,3 +376,234 @@ class TestKerberosAuth:
         monkeypatch.setitem(sys.modules, "httpx_gssapi", stub)
         client = make_client(auth="kerberos")
         assert client._http.auth is sentinel
+
+
+def query_response(columns, rows):
+    return httpx.Response(200, json={"columns": columns, "rows": rows, "queryId": "q"})
+
+
+class TestMetadata:
+    @respx.mock
+    def test_schemas_queries_information_schema(self):
+        route = respx.post(f"{BASE}/query.json").mock(
+            return_value=query_response(
+                ["SCHEMA_NAME", "TYPE"], [{"SCHEMA_NAME": "dfs.tmp", "TYPE": "file"}]
+            )
+        )
+        assert make_client().schemas() == [{"name": "dfs.tmp", "type": "file"}]
+        assert b"INFORMATION_SCHEMA" in route.calls.last.request.read()
+
+    @respx.mock
+    def test_tables_filters_by_schema(self):
+        route = respx.post(f"{BASE}/query.json").mock(
+            return_value=query_response(
+                ["TABLE_NAME", "TABLE_TYPE"], [{"TABLE_NAME": "t", "TABLE_TYPE": "TABLE"}]
+            )
+        )
+        assert make_client().tables("dfs.tmp") == [{"name": "t", "type": "TABLE"}]
+        assert b"'dfs.tmp'" in route.calls.last.request.read()
+
+    @respx.mock
+    def test_columns_returns_name_type_nullable(self):
+        respx.post(f"{BASE}/query.json").mock(
+            return_value=query_response(
+                ["COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE"],
+                [{"COLUMN_NAME": "id", "DATA_TYPE": "INTEGER", "IS_NULLABLE": "YES"}],
+            )
+        )
+        assert make_client().columns("dfs.tmp", "t") == [
+            {"name": "id", "data_type": "INTEGER", "nullable": True}
+        ]
+
+    @respx.mock
+    def test_metadata_rejects_injection_in_schema_name(self):
+        with pytest.raises(DrillError, match="invalid identifier"):
+            make_client().tables("dfs'; DROP TABLE x --")
+
+
+class TestFilePluginMetadata:
+    """File plugins are absent from INFORMATION_SCHEMA; they need SHOW FILES."""
+
+    @staticmethod
+    def _schemata(plugin_type):
+        return query_response(["SCHEMA_NAME", "TYPE"], [{"SCHEMA_NAME": "dfs.tmp", "TYPE": plugin_type}])
+
+    @respx.mock
+    def test_tables_uses_show_files_for_a_file_plugin(self):
+        route = respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("file"),
+                query_response(["name", "isDirectory"], [{"name": "sales.csv", "isDirectory": "false"}]),
+            ]
+        )
+        assert make_client().tables("dfs.tmp") == [{"name": "sales.csv", "type": "TABLE"}]
+        assert b"SHOW FILES FROM" in route.calls[1].request.read()
+
+    @respx.mock
+    def test_show_files_marks_directories(self):
+        respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("file"),
+                query_response(["name", "isDirectory"], [{"name": "year=2024", "isDirectory": "true"}]),
+            ]
+        )
+        assert make_client().tables("dfs.tmp")[0]["type"] == "DIRECTORY"
+
+    @respx.mock
+    def test_show_files_strips_the_view_drill_suffix(self):
+        respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("file"),
+                query_response(["name", "isDirectory"], [{"name": "top_sales.view.drill", "isDirectory": "false"}]),
+            ]
+        )
+        assert make_client().tables("dfs.tmp") == [{"name": "top_sales", "type": "VIEW"}]
+
+    @respx.mock
+    def test_tables_uses_information_schema_for_a_non_file_plugin(self):
+        route = respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("jdbc"),
+                query_response(["TABLE_NAME", "TABLE_TYPE"], [{"TABLE_NAME": "t", "TABLE_TYPE": "TABLE"}]),
+            ]
+        )
+        assert make_client().tables("mysql.app") == [{"name": "t", "type": "TABLE"}]
+        assert b"INFORMATION_SCHEMA" in route.calls[1].request.read()
+
+    @respx.mock
+    def test_columns_uses_describe_for_a_file_plugin(self):
+        route = respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("file"),
+                query_response(
+                    ["COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE"],
+                    [{"COLUMN_NAME": "id", "DATA_TYPE": "BIGINT", "IS_NULLABLE": "YES"}],
+                ),
+            ]
+        )
+        assert make_client().columns("dfs.tmp", "sales.csv") == [
+            {"name": "id", "data_type": "BIGINT", "nullable": True}
+        ]
+        body = route.calls[1].request.read()
+        assert b"DESCRIBE" in body
+        # Metadata-only: never read user rows to answer a metadata question.
+        assert b"LIMIT 1" not in body
+        assert b"SELECT *" not in body
+
+    @respx.mock
+    def test_columns_uses_information_schema_for_a_non_file_plugin(self):
+        route = respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("jdbc"),
+                query_response(
+                    ["COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE"],
+                    [{"COLUMN_NAME": "id", "DATA_TYPE": "INTEGER", "IS_NULLABLE": "NO"}],
+                ),
+            ]
+        )
+        result = make_client().columns("mysql.app", "t")
+        assert result == [{"name": "id", "data_type": "INTEGER", "nullable": False}]
+        assert b"INFORMATION_SCHEMA" in route.calls[1].request.read()
+
+    @respx.mock
+    def test_unknown_plugin_type_falls_back_to_information_schema(self):
+        respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                query_response(["SCHEMA_NAME", "TYPE"], []),
+                query_response(["TABLE_NAME", "TABLE_TYPE"], []),
+            ]
+        )
+        assert make_client().tables("nope") == []
+
+    @respx.mock
+    def test_show_files_path_still_rejects_injection(self):
+        respx.post(f"{BASE}/query.json").mock(return_value=self._schemata("file"))
+        with pytest.raises(DrillError, match="invalid identifier"):
+            make_client().tables("dfs`; DROP TABLE x --")
+
+    @respx.mock
+    def test_metadata_rejects_injection_in_table_name(self):
+        with pytest.raises(DrillError, match="invalid identifier"):
+            make_client().columns("dfs.tmp", "t' OR '1'='1")
+
+
+class TestManagement:
+    @respx.mock
+    def test_storage_plugins_are_redacted(self):
+        respx.get(f"{BASE}/storage.json").mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {
+                        "name": "s3",
+                        "config": {"type": "file", "fs.s3a.secret.key": "verysecret"},
+                    }
+                ],
+            )
+        )
+        plugins = make_client().storage_plugins()
+        assert plugins[0]["config"]["fs.s3a.secret.key"] == "***REDACTED***"
+        assert plugins[0]["name"] == "s3"
+
+    @respx.mock
+    def test_cluster_status_merges_cluster_and_status(self):
+        respx.get(f"{BASE}/cluster.json").mock(
+            return_value=httpx.Response(200, json={"drillbits": [{"address": "n1"}]})
+        )
+        respx.get(f"{BASE}/status.json").mock(
+            return_value=httpx.Response(200, json={"status": "Running!"})
+        )
+        result = make_client().cluster_status()
+        assert result["drillbits"] == [{"address": "n1"}]
+        assert result["status"] == "Running!"
+
+    @respx.mock
+    def test_profiles_are_limited(self):
+        respx.get(f"{BASE}/profiles.json").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "finishedQueries": [{"queryId": f"q{i}"} for i in range(10)],
+                    "runningQueries": [],
+                },
+            )
+        )
+        assert len(make_client().profiles(limit=3)) == 3
+
+    @respx.mock
+    def test_profiles_include_running_queries_first(self):
+        respx.get(f"{BASE}/profiles.json").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "runningQueries": [{"queryId": "live"}],
+                    "finishedQueries": [{"queryId": "done"}],
+                },
+            )
+        )
+        assert make_client().profiles(limit=5)[0]["queryId"] == "live"
+
+    @respx.mock
+    def test_profile_fetches_one_query(self):
+        respx.get(f"{BASE}/profiles/abc.json").mock(
+            return_value=httpx.Response(200, json={"queryId": "abc", "state": "COMPLETED"})
+        )
+        assert make_client().profile("abc")["state"] == "COMPLETED"
+
+    @respx.mock
+    def test_profile_rejects_a_malformed_query_id(self):
+        with pytest.raises(DrillError, match="invalid"):
+            make_client().profile("../../etc/passwd")
+
+    @respx.mock
+    def test_cancel_query(self):
+        route = respx.get(f"{BASE}/profiles/cancel/abc").mock(
+            return_value=httpx.Response(200, text="Cancelled query abc")
+        )
+        assert "abc" in make_client().cancel_query("abc")
+        assert route.called
+
+    @respx.mock
+    def test_cancel_rejects_a_malformed_query_id(self):
+        with pytest.raises(DrillError, match="invalid"):
+            make_client().cancel_query("abc; rm -rf /")

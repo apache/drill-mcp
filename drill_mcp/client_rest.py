@@ -34,6 +34,7 @@ from typing import Any
 import httpx
 
 from .config import Config
+from .redact import redact
 
 # -- quoting -----------------------------------------------------------------
 #
@@ -112,6 +113,27 @@ def quote_literal_path(value: str) -> str:
     if any(not _IDENTIFIER.fullmatch(part) for part in parts):
         raise DrillError(f"invalid identifier: {value!r}")
     return f"'{value}'"
+
+
+def quote_identifier_path(value: str) -> str:
+    """Validate a dotted path and return it backtick-quoted: dfs.tmp -> `dfs`.`tmp`.
+
+    Same trust boundary as quote_literal_path -- these values arrive from the
+    model and are interpolated into SQL. Reject rather than escape.
+    """
+    parts = value.split(".")
+    if any(not _IDENTIFIER.fullmatch(part) for part in parts):
+        raise DrillError(f"invalid identifier: {value!r}")
+    return ".".join(f"`{part}`" for part in parts)
+
+
+_QUERY_ID = re.compile(r"[A-Za-z0-9-]+")
+
+
+def _check_query_id(query_id: str) -> str:
+    if not _QUERY_ID.fullmatch(query_id):
+        raise DrillError(f"invalid query id: {query_id!r}")
+    return query_id
 
 
 def _error_text(response: httpx.Response) -> str:
@@ -246,3 +268,132 @@ class RestClient:
             query_id=payload.get("queryId"),
             truncated=max_rows > 0 and len(rows) >= max_rows,
         )
+
+    # -- metadata ----------------------------------------------------------
+
+    def schemas(self) -> list[dict[str, Any]]:
+        result = self.query(
+            "SELECT SCHEMA_NAME, TYPE FROM INFORMATION_SCHEMA.SCHEMATA "
+            "ORDER BY SCHEMA_NAME",
+            max_rows=10_000,
+        )
+        return [
+            {"name": row.get("SCHEMA_NAME"), "type": row.get("TYPE")}
+            for row in result.rows
+        ]
+
+    def plugin_type(self, schema: str) -> str | None:
+        """Return the storage plugin TYPE backing `schema`, or None if unknown.
+
+        File-based plugins (`dfs`, `s3`) do not register their contents in
+        INFORMATION_SCHEMA, so `tables` and `columns` must branch on this.
+        """
+        result = self.query(
+            "SELECT SCHEMA_NAME, TYPE FROM INFORMATION_SCHEMA.`SCHEMATA` "
+            f"WHERE SCHEMA_NAME = {quote_literal_path(schema)}",
+            max_rows=1,
+        )
+        return result.rows[0].get("TYPE") if result.rows else None
+
+    def tables(self, schema: str) -> list[dict[str, Any]]:
+        # File plugins are absent from INFORMATION_SCHEMA.`TABLES`; querying it
+        # for `dfs.tmp` returns an empty list that looks like an empty workspace.
+        # `SHOW FILES` is the only way to enumerate them. sqlalchemy-drill's
+        # get_table_names branches the same way.
+        if self.plugin_type(schema) == "file":
+            result = self.query(
+                f"SHOW FILES FROM {quote_identifier_path(schema)}", max_rows=10_000
+            )
+            tables: list[dict[str, Any]] = []
+            for row in result.rows:
+                name = row.get("name")
+                if not name:
+                    continue
+                # Drill stores a view as a `<name>.view.drill` file in the workspace.
+                if name.endswith(".view.drill"):
+                    tables.append({"name": name[: -len(".view.drill")], "type": "VIEW"})
+                else:
+                    is_dir = str(row.get("isDirectory", "")).lower() == "true"
+                    tables.append({"name": name, "type": "DIRECTORY" if is_dir else "TABLE"})
+            return sorted(tables, key=lambda t: t["name"])
+
+        result = self.query(
+            "SELECT TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.`TABLES` "
+            f"WHERE TABLE_SCHEMA = {quote_literal_path(schema)} ORDER BY TABLE_NAME",
+            max_rows=10_000,
+        )
+        return [
+            {"name": row.get("TABLE_NAME"), "type": row.get("TABLE_TYPE")}
+            for row in result.rows
+        ]
+
+    def columns(self, schema: str, table: str) -> list[dict[str, Any]]:
+        # Validate the table name up front, before the plugin_type lookup fires
+        # a query: an invalid table name should never make it to the network.
+        # File-plugin table names are filenames and may contain a literal "."
+        # (e.g. "sales.csv"), so validate segment-by-segment like a dotted path.
+        if any(not _IDENTIFIER.fullmatch(part) for part in table.split(".")):
+            raise DrillError(f"invalid identifier: {table!r}")
+
+        # Same split: file plugins have dynamic schemas and no
+        # INFORMATION_SCHEMA.`COLUMNS` rows. DESCRIBE is metadata-only --
+        # deliberately NOT a `SELECT * ... LIMIT 1` probe, which would read user
+        # data to answer a metadata question.
+        if self.plugin_type(schema) == "file":
+            result = self.query(
+                f"DESCRIBE {quote_identifier_path(schema + '.' + table)}",
+                max_rows=10_000,
+            )
+            return [
+                {
+                    "name": row.get("COLUMN_NAME"),
+                    "data_type": row.get("DATA_TYPE"),
+                    "nullable": str(row.get("IS_NULLABLE", "")).upper() == "YES",
+                }
+                for row in result.rows
+            ]
+
+        result = self.query(
+            "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM INFORMATION_SCHEMA.`COLUMNS` "
+            f"WHERE TABLE_SCHEMA = {quote_literal_path(schema)} "
+            f"AND TABLE_NAME = {quote_literal(table)} ORDER BY ORDINAL_POSITION",
+            max_rows=10_000,
+        )
+        return [
+            {
+                "name": row.get("COLUMN_NAME"),
+                "data_type": row.get("DATA_TYPE"),
+                "nullable": str(row.get("IS_NULLABLE", "")).upper() == "YES",
+            }
+            for row in result.rows
+        ]
+
+    # -- management --------------------------------------------------------
+
+    def storage_plugins(self) -> list[dict[str, Any]]:
+        payload = self._request("GET", "/storage.json").json()
+        return redact(payload)
+
+    def cluster_status(self) -> dict[str, Any]:
+        cluster = self._request("GET", "/cluster.json").json()
+        status = self._request("GET", "/status.json").json()
+        merged = dict(cluster) if isinstance(cluster, dict) else {"cluster": cluster}
+        if isinstance(status, dict):
+            merged.update(status)
+        else:
+            merged["status"] = status
+        return merged
+
+    def profiles(self, limit: int) -> list[dict[str, Any]]:
+        payload = self._request("GET", "/profiles.json").json()
+        running = payload.get("runningQueries") or []
+        finished = payload.get("finishedQueries") or []
+        return (list(running) + list(finished))[:limit]
+
+    def profile(self, query_id: str) -> dict[str, Any]:
+        _check_query_id(query_id)
+        return self._request("GET", f"/profiles/{query_id}.json").json()
+
+    def cancel_query(self, query_id: str) -> str:
+        _check_query_id(query_id)
+        return self._request("GET", f"/profiles/cancel/{query_id}").text
