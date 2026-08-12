@@ -150,6 +150,12 @@ class DrillTools:
         if self._policy.hidden_schemas and is_show_command(sql):
             rows = [row for row in rows if self._visible(_first_value(row))]
 
+        # Belt-and-suspenders: both backend clients already cap `rows` to
+        # `limit`, but this tool method is the last chokepoint before the
+        # model sees the data, so the cap is enforced here too rather than
+        # trusted from below.
+        rows = rows[:limit]
+
         payload: dict[str, Any] = {
             "columns": result.columns,
             "rows": rows,

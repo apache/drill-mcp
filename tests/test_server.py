@@ -48,6 +48,18 @@ class TestRunQuery:
         make_tools(client, max_rows=100).run_query("SELECT 1")
         assert client.query.call_args.kwargs["max_rows"] == 100
 
+    def test_enforces_the_row_cap_even_if_the_client_returns_more(self):
+        # RestClient and JdbcClient both cap rows themselves, but run_query
+        # is the last chokepoint before the model, so it must not simply
+        # trust whatever the client hands back.
+        client = MagicMock()
+        client.query.return_value = QueryResult(
+            ["a"], [{"a": i} for i in range(10)], "q1", False
+        )
+        result = make_tools(client, max_rows=3).run_query("SELECT 1")
+        assert len(result["rows"]) == 3
+        assert result["rows"] == [{"a": 0}, {"a": 1}, {"a": 2}]
+
     def test_caller_may_lower_the_cap(self):
         client = MagicMock()
         client.query.return_value = QueryResult()
