@@ -53,5 +53,3 @@ drill-mcp = "drill_mcp.server:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["integration: requires a live Drill cluster (deselected by default)"]
-addopts = "-m 'not integration'"
