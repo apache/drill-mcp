@@ -30,7 +30,7 @@ from typing import Any
 
 from .client_rest import DrillError
 from .config import Config
-from .guard import Policy, PolicyError, check, is_show_schemas, matches_prefix
+from .guard import Policy, PolicyError, check, is_show_command, matches_prefix
 
 
 class ToolError(Exception):
@@ -101,11 +101,19 @@ class DrillTools:
         except DrillError as exc:
             raise ToolError(str(exc)) from exc
 
-        # `SHOW SCHEMAS` / `SHOW DATABASES` are evaluated server-side by
-        # Drill, so the guard cannot filter them by rewriting or rejecting
-        # the query; their rows are filtered here on the way back instead.
+        # SHOW commands are evaluated server-side by Drill, so the guard
+        # cannot filter them by rewriting or rejecting the query; their rows
+        # are filtered here on the way back instead. This filters *every*
+        # SHOW command's first column, not just SHOW SCHEMAS/DATABASES: there
+        # is no reliable way to positively identify which SHOW spelling
+        # names a schema (see guard.is_show_command's docstring for the
+        # three narrower approaches that each leaked hidden schemas through
+        # some spelling). Filtering all SHOW output means SHOW TABLES/SHOW
+        # FILES rows are incidentally filtered too — a table or file that
+        # happens to be named after a hidden schema gets dropped — which is
+        # an acceptable, fail-closed trade-off; a leaked schema is not.
         rows = result.rows
-        if self._policy.hidden_schemas and is_show_schemas(sql):
+        if self._policy.hidden_schemas and is_show_command(sql):
             rows = [row for row in rows if self._visible(_first_value(row))]
 
         payload: dict[str, Any] = {

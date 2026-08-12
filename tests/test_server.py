@@ -287,7 +287,19 @@ class TestManagementTools:
 
 
 class TestShowFiltering:
-    """SHOW is evaluated server-side by Drill, so rows are filtered on return."""
+    """SHOW is evaluated server-side by Drill, so rows are filtered on return.
+
+    Filtering applies to *every* SHOW command's first column, not just SHOW
+    SCHEMAS/SHOW DATABASES. Three narrower attempts at recognising only the
+    schema-listing spellings (a raw regex over the SQL text, exact equality
+    against the parsed Command's literal, a comment-stripping regex over that
+    literal) each leaked hidden schemas through some spelling the classifier
+    failed to recognise. Filtering all SHOW output instead means SHOW
+    TABLES/SHOW FILES rows are incidentally filtered too, but that direction
+    of failure — over-filtering a table that happens to share a name with a
+    hidden schema — is the safe one; leaking the schema list is not. See
+    guard.is_show_command's docstring for the full history.
+    """
 
     def test_show_schemas_rows_are_filtered(self):
         client = MagicMock()
@@ -368,34 +380,39 @@ class TestShowFiltering:
         result = make_tools(client, hidden_schemas=["sys"]).run_query("ShOw ScHeMaS")
         assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
 
-    def test_show_tables_rows_are_not_filtered(self):
-        """SHOW TABLES rows are table names, not schema names; filtering them
-        against hidden_schemas would be wrong."""
+    def test_show_tables_rows_are_now_filtered_too(self):
+        """Inverted deliberately: SHOW TABLES rows are table names, not
+        schema names, so filtering them against hidden_schemas can drop a
+        table that happens to share a name with a hidden schema. That is the
+        accepted, fail-closed trade-off — SHOW output is filtered as a whole
+        because no reliable way exists to single out just the
+        schema-listing spellings of SHOW without risking a leak (see the
+        class docstring). A table literally named "sys" is rare; a leaked
+        hidden schema list is not an acceptable alternative."""
         client = MagicMock()
         client.query.return_value = QueryResult(
-            ["TABLE_NAME"], [{"TABLE_NAME": "sys"}]
+            ["TABLE_NAME"], [{"TABLE_NAME": "sys"}, {"TABLE_NAME": "orders"}]
         )
         result = make_tools(client, hidden_schemas=["sys"]).run_query("SHOW TABLES")
-        assert result["rows"] == [{"TABLE_NAME": "sys"}]
+        assert result["rows"] == [{"TABLE_NAME": "orders"}]
 
-    def test_show_tables_like_rows_are_not_filtered(self):
-        """A trailing LIKE clause must not make SHOW TABLES look like a schema
-        listing either."""
+    def test_show_tables_like_rows_are_filtered_too(self):
         client = MagicMock()
         client.query.return_value = QueryResult(
-            ["TABLE_NAME"], [{"TABLE_NAME": "sys"}]
+            ["TABLE_NAME"], [{"TABLE_NAME": "sys"}, {"TABLE_NAME": "orders"}]
         )
         result = make_tools(client, hidden_schemas=["sys"]).run_query(
             "SHOW TABLES LIKE '%s%'"
         )
-        assert result["rows"] == [{"TABLE_NAME": "sys"}]
+        assert result["rows"] == [{"TABLE_NAME": "orders"}]
 
     def test_show_schemas_like_rows_are_filtered(self):
         """Regression test: `SHOW SCHEMAS LIKE '...'` is documented Drill
         syntax. sqlglot's Command fallback swallows the whole remainder
-        (`SCHEMAS LIKE '%dfs%'`) into a single literal, so comparing that
-        literal whole (or even stripped-and-uppercased) only matches the bare
-        two-word spelling and lets this form through unfiltered."""
+        (`SCHEMAS LIKE '%dfs%'`) into a single literal, so any classifier
+        that inspects that text specifically has some spelling it misses;
+        filtering every SHOW command sidesteps the classification problem
+        entirely."""
         client = MagicMock()
         client.query.return_value = QueryResult(
             ["SCHEMA_NAME"],
@@ -439,6 +456,44 @@ class TestShowFiltering:
         )
         assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
 
+    def test_show_schemas_with_trailing_semicolon_is_still_filtered(self):
+        client = MagicMock()
+        client.query.return_value = QueryResult(
+            ["SCHEMA_NAME"],
+            [{"SCHEMA_NAME": "sys"}, {"SCHEMA_NAME": "dfs.tmp"}],
+        )
+        result = make_tools(client, hidden_schemas=["sys"]).run_query("SHOW SCHEMAS;")
+        assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
+
+    def test_show_schemas_with_nested_block_comment_is_still_filtered(self):
+        """Regression test for the specific input that defeated the
+        comment-stripping regex fix: non-greedy `/\\*.*?\\*/` matching stops
+        at the first `*/`, leaving `*/ SCHEMAS` behind, so the "first token"
+        became `*/` instead of `SCHEMAS` and the row leaked."""
+        client = MagicMock()
+        client.query.return_value = QueryResult(
+            ["SCHEMA_NAME"],
+            [{"SCHEMA_NAME": "sys"}, {"SCHEMA_NAME": "dfs.tmp"}],
+        )
+        result = make_tools(client, hidden_schemas=["sys"]).run_query(
+            "SHOW /* /* nested */ */ SCHEMAS"
+        )
+        assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
+
+    def test_show_schemas_with_unbalanced_comment_delimiter_is_still_filtered(self):
+        """Regression test for the other input that defeated the
+        comment-stripping regex: a stray `*/` with no opener strips nothing
+        at all, so the row leaked."""
+        client = MagicMock()
+        client.query.return_value = QueryResult(
+            ["SCHEMA_NAME"],
+            [{"SCHEMA_NAME": "sys"}, {"SCHEMA_NAME": "dfs.tmp"}],
+        )
+        result = make_tools(client, hidden_schemas=["sys"]).run_query(
+            "SHOW */ SCHEMAS"
+        )
+        assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
+
     def test_row_that_is_not_a_dict_does_not_crash_filtering(self):
         """A malformed row must not raise a raw AttributeError out of the
         filter; it should simply be treated as not identifiable and dropped
@@ -448,4 +503,35 @@ class TestShowFiltering:
             ["SCHEMA_NAME"], ["not-a-dict", {"SCHEMA_NAME": "dfs.tmp"}]
         )
         result = make_tools(client, hidden_schemas=["sys"]).run_query("SHOW SCHEMAS")
+        assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SHOW SCHEMAS",
+            "SHOW DATABASES",
+            "/* x */ SHOW SCHEMAS",
+            "-- c\nSHOW DATABASES",
+            "SHOW SCHEMAS LIKE '%dfs%'",
+            "SHOW SCHEMAS /* t */",
+            "SHOW/**/SCHEMAS",
+            "SHOW /* /* nested */ */ SCHEMAS",
+            "SHOW */ SCHEMAS",
+            "show schemas",
+            "SHOW SCHEMAS;",
+        ],
+    )
+    def test_hidden_row_never_appears_in_the_tool_payload(self, sql):
+        """End-to-end assertion on the tool's actual output, independent of
+        how detection is implemented: for every spelling that previously
+        leaked through one of the three narrower classifiers, the hidden
+        schema must not appear anywhere in the returned payload, not just in
+        a specific `rows` shape."""
+        client = MagicMock()
+        client.query.return_value = QueryResult(
+            ["SCHEMA_NAME"],
+            [{"SCHEMA_NAME": "sys"}, {"SCHEMA_NAME": "dfs.tmp"}],
+        )
+        result = make_tools(client, hidden_schemas=["sys"]).run_query(sql)
+        assert {"SCHEMA_NAME": "sys"} not in result["rows"]
         assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]

@@ -90,31 +90,36 @@ def matches_prefix(qualified: str, entries: Iterable[str]) -> bool:
     return False
 
 
-def is_show_schemas(sql: str) -> bool:
-    """True if `sql` is `SHOW SCHEMAS` or `SHOW DATABASES`, with or without a
-    trailing `LIKE '...'` clause.
+def is_show_command(sql: str) -> bool:
+    """True if `sql` is any `SHOW ...` statement (`SCHEMAS`, `DATABASES`,
+    `TABLES`, `FILES`, ...).
 
-    Detected from the parsed statement, not a regex over the raw text: a
-    leading comment (`/* x */ SHOW SCHEMAS`) defeats a `^\\s*SHOW` anchor
-    because comments are only stripped by the tokenizer, not by string
-    matching. Drill's grammar for both spellings falls back to sqlglot's
-    generic `Command`, with the *entire remainder* of the statement left as
-    one `Literal` in `expression` (e.g. `Command(this='SHOW',
-    expression=Literal(this='SCHEMAS'))`, but equally
-    `Literal(this="SCHEMAS LIKE '%dfs%'")` or `Literal(this='/**/SCHEMAS')`
-    for `SHOW/**/SCHEMAS`). Comparing that literal whole, or even
-    stripped-and-uppercased, only matches the bare two-word spelling and lets
-    `SHOW SCHEMAS LIKE '...'` — documented Drill syntax — through unfiltered.
-    Only the first token decides it: strip block comments (the only comment
-    style that can land inside the remainder; a leading `--` comment is
-    stripped by the tokenizer before this text is ever assembled, and a
-    trailing `--` comment lands after the first token so it never affects
-    the check), then split on whitespace and compare the first word alone.
+    This used to try to positively identify `SHOW SCHEMAS`/`SHOW DATABASES`
+    specifically, by inspecting the text of whatever sqlglot left in the
+    Command's `expression` literal. Three attempts at that (a regex over the
+    raw SQL, exact-equality against the literal, comparing only its first
+    token after stripping `/* */` comments) all failed the same way: Drill's
+    `SHOW` grammar has no dedicated sqlglot node, so everything after the
+    keyword — including `LIKE '...'` clauses, embedded comments, and
+    unbalanced comment delimiters like `SHOW */ SCHEMAS` — collapses into one
+    opaque literal, and any classifier over that text has some spelling it
+    fails to recognise. A classifier that fails open on the shapes it does
+    not recognise is the wrong shape entirely for a security filter: it must
+    fail closed instead.
+
+    So this checks only whether the statement is a `SHOW` command at all —
+    one already-parsed field (`statement.this == "SHOW"`), no text parsing.
+    The caller filters the first column of *any* `SHOW` command's result set
+    when hidden_schemas is configured, accepting that `SHOW TABLES`/`SHOW
+    FILES` rows are incidentally run through the same filter (a table or file
+    literally named `sys`, for a `hidden_schemas: [sys]` policy, would be
+    dropped) in exchange for the property that no `SHOW` spelling can leak a
+    hidden schema by evading a classifier.
 
     Returns False rather than raising if `sql` does not parse: by the time
-    this is called, `check()` has already accepted the statement, so a
-    parse failure here would be a bug in this function, not a policy
-    decision to surface.
+    this is called, `check()` has already accepted the statement, so a parse
+    failure here would be a bug in this function, not a policy decision to
+    surface.
     """
     try:
         statements = [s for s in sqlglot.parse(sql, read=DIALECT) if s is not None]
@@ -123,15 +128,7 @@ def is_show_schemas(sql: str) -> bool:
     if len(statements) != 1:
         return False
     statement = statements[0]
-    if not isinstance(statement, exp.Command):
-        return False
-    if str(statement.this or "").upper() != "SHOW":
-        return False
-    expression = statement.args.get("expression")
-    target = expression.this if isinstance(expression, exp.Literal) else str(expression or "")
-    without_comments = re.sub(r"/\*.*?\*/", " ", str(target or ""), flags=re.S)
-    words = without_comments.strip().split(maxsplit=1)
-    return bool(words) and words[0].upper() in {"SCHEMAS", "DATABASES"}
+    return isinstance(statement, exp.Command) and str(statement.this or "").upper() == "SHOW"
 
 
 def check(sql: str, policy: Policy) -> None:

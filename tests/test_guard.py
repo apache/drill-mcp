@@ -24,7 +24,7 @@ import sqlglot
 from sqlglot import exp
 
 import drill_mcp.guard as guard_module
-from drill_mcp.guard import Policy, PolicyError, check, is_show_schemas, matches_prefix
+from drill_mcp.guard import Policy, PolicyError, check, is_show_command, matches_prefix
 
 
 class TestSqlglotAssumptions:
@@ -328,86 +328,82 @@ class TestDrillDialectRegressions:
             check("SELECT * FROM `sys`.options", hidden)
 
 
-class TestIsShowSchemas:
-    """Detection is parser-based, not a regex over the raw SQL string, so a
-    leading comment (which the tokenizer strips) cannot defeat it.
+class TestIsShowCommand:
+    """`is_show_command` deliberately does not try to distinguish `SHOW
+    SCHEMAS`/`SHOW DATABASES` from other SHOW spellings: three attempts at
+    that classification (a raw regex, exact literal equality, a
+    comment-stripping regex) each leaked hidden schemas through some spelling
+    the classifier failed to recognise (a LIKE clause, an embedded comment,
+    an unbalanced `*/`). This is a single already-parsed-field check —
+    `statement.this == "SHOW"` — with no text parsing left to get wrong, so
+    it cannot fail open the way a classifier can.
     """
 
     def test_show_schemas_matches(self):
-        assert is_show_schemas("SHOW SCHEMAS") is True
+        assert is_show_command("SHOW SCHEMAS") is True
 
     def test_show_databases_matches(self):
-        assert is_show_schemas("SHOW DATABASES") is True
+        assert is_show_command("SHOW DATABASES") is True
+
+    def test_show_tables_matches(self):
+        """SHOW TABLES is also a SHOW command; the caller filters its rows
+        too, as the fail-closed trade-off (see server.run_query)."""
+        assert is_show_command("SHOW TABLES") is True
+
+    def test_show_files_matches(self):
+        assert is_show_command("SHOW FILES IN dfs.tmp") is True
 
     def test_lowercase_matches(self):
-        assert is_show_schemas("show schemas") is True
+        assert is_show_command("show schemas") is True
 
     def test_mixed_case_matches(self):
-        assert is_show_schemas("ShOw DaTaBaSeS") is True
+        assert is_show_command("ShOw DaTaBaSeS") is True
 
     def test_leading_block_comment_still_matches(self):
-        assert is_show_schemas("/* x */ SHOW SCHEMAS") is True
+        assert is_show_command("/* x */ SHOW SCHEMAS") is True
 
     def test_leading_line_comment_still_matches(self):
-        assert is_show_schemas("-- comment\nSHOW DATABASES") is True
+        assert is_show_command("-- comment\nSHOW DATABASES") is True
 
-    def test_show_tables_does_not_match(self):
-        assert is_show_schemas("SHOW TABLES") is False
+    def test_like_clause_still_matches(self):
+        assert is_show_command("SHOW SCHEMAS LIKE '%dfs%'") is True
 
-    def test_show_files_does_not_match(self):
-        assert is_show_schemas("SHOW FILES IN dfs.tmp") is False
+    def test_trailing_block_comment_still_matches(self):
+        assert is_show_command("SHOW SCHEMAS /* trailing */") is True
+
+    def test_no_space_before_comment_still_matches(self):
+        assert is_show_command("SHOW/**/SCHEMAS") is True
+
+    def test_trailing_semicolon_still_matches(self):
+        assert is_show_command("SHOW SCHEMAS;") is True
+
+    def test_trailing_line_comment_still_matches(self):
+        assert is_show_command("SHOW SCHEMAS -- trailing comment") is True
+
+    def test_nested_block_comment_still_matches(self):
+        """This is the specific input that defeated the comment-stripping
+        regex (`re.sub(r"/\\*.*?\\*/", " ", ...)`): non-greedy matching stops
+        at the first `*/`, leaving `*/ SCHEMAS` behind. `is_show_command`
+        never inspects that text at all, so it is unaffected."""
+        assert is_show_command("SHOW /* /* nested */ */ SCHEMAS") is True
+
+    def test_unbalanced_comment_delimiter_still_matches(self):
+        """The other input that defeated the comment-stripping regex: a
+        stray `*/` with no opener strips nothing, so the first token became
+        `*/` instead of `SCHEMAS`."""
+        assert is_show_command("SHOW */ SCHEMAS") is True
 
     def test_ordinary_select_does_not_match(self):
-        assert is_show_schemas("SELECT * FROM dfs.tmp.notes") is False
+        assert is_show_command("SELECT * FROM dfs.tmp.notes") is False
 
     def test_select_mentioning_show_as_a_string_does_not_match(self):
-        assert is_show_schemas("SELECT 'SHOW SCHEMAS' AS x") is False
+        assert is_show_command("SELECT 'SHOW SCHEMAS' AS x") is False
 
     def test_unparseable_sql_returns_false_rather_than_raising(self):
-        assert is_show_schemas("((((((") is False
+        assert is_show_command("((((((") is False
 
     def test_empty_sql_returns_false(self):
-        assert is_show_schemas("") is False
-
-    def test_show_schemas_with_like_clause_matches(self):
-        """Regression test: sqlglot's Command fallback swallows the entire
-        remainder after SHOW into one literal, so `SCHEMAS LIKE '%dfs%'` must
-        be recognised by its first token, not by comparing the literal as a
-        whole (which only matches the bare two-word spelling)."""
-        assert is_show_schemas("SHOW SCHEMAS LIKE '%dfs%'") is True
-
-    def test_show_databases_with_like_clause_matches(self):
-        assert is_show_schemas("SHOW DATABASES LIKE '%y%'") is True
-
-    def test_show_tables_with_like_clause_does_not_match(self):
-        assert is_show_schemas("SHOW TABLES LIKE '%x%'") is False
-
-    def test_show_schemas_with_trailing_block_comment_matches(self):
-        assert is_show_schemas("SHOW SCHEMAS /* trailing */") is True
-
-    def test_show_schemas_with_no_space_before_comment_matches(self):
-        assert is_show_schemas("SHOW/**/SCHEMAS") is True
-
-    def test_show_schemas_with_trailing_semicolon_matches(self):
-        assert is_show_schemas("SHOW SCHEMAS;") is True
-
-    def test_show_schemas_with_trailing_line_comment_matches(self):
-        assert is_show_schemas("SHOW SCHEMAS -- trailing comment") is True
-
-    def test_raw_regex_would_have_missed_the_like_clause(self):
-        """Documents the exact failure mode this class regression-tests: the
-        brief's original `^\\s*SHOW\\s+(SCHEMAS|DATABASES)\\b` regex matches
-        the bare spelling but the naive fix of comparing the whole Command
-        literal against {"SCHEMAS", "DATABASES"} also fails on this input,
-        because the literal for `SHOW SCHEMAS LIKE '%dfs%'` is the full
-        string `"SCHEMAS LIKE '%dfs%'"`, not `"SCHEMAS"`.
-        """
-        whole_literal_equality = "SCHEMAS LIKE '%dfs%'".strip().upper() in {
-            "SCHEMAS",
-            "DATABASES",
-        }
-        assert whole_literal_equality is False
-        assert is_show_schemas("SHOW SCHEMAS LIKE '%dfs%'") is True
+        assert is_show_command("") is False
 
 
 class TestCoverageGaps:
