@@ -37,7 +37,9 @@ class ToolError(Exception):
     """The single error type surfaced to MCP clients. Never carries a traceback."""
 
 
-def _first_value(row: dict[str, Any]) -> str | None:
+def _first_value(row: Any) -> str | None:
+    if not isinstance(row, dict):
+        return None
     for value in row.values():
         return str(value) if value is not None else None
     return None
@@ -62,7 +64,14 @@ class DrillTools:
             raise ToolError(f"schema '{schema}' is hidden by configuration")
 
     def _visible(self, schema: str | None) -> bool:
-        return not matches_prefix(schema or "", self._policy.hidden_schemas)
+        # Fail closed, not open: an item this function cannot identify (no
+        # name at all) is filtered out rather than shown by default. Drill
+        # never actually returns a null schema/plugin name, but this
+        # function's whole job is filtering, so its default on a value it
+        # cannot classify must not be "keep it".
+        if schema is None:
+            return False
+        return not matches_prefix(schema, self._policy.hidden_schemas)
 
     # -- query and metadata tools -------------------------------------------
 
@@ -153,7 +162,9 @@ class DrillTools:
             plugins = self._require_management("storage_plugins")()
         except DrillError as exc:
             raise ToolError(str(exc)) from exc
-        return [p for p in plugins if self._visible(p.get("name"))]
+        return [
+            p for p in plugins if isinstance(p, dict) and self._visible(p.get("name"))
+        ]
 
     def cluster_status(self) -> dict[str, Any]:
         """Report Drillbit membership and overall cluster status."""

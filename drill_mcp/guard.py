@@ -91,14 +91,25 @@ def matches_prefix(qualified: str, entries: Iterable[str]) -> bool:
 
 
 def is_show_schemas(sql: str) -> bool:
-    """True if `sql` is `SHOW SCHEMAS` or `SHOW DATABASES`.
+    """True if `sql` is `SHOW SCHEMAS` or `SHOW DATABASES`, with or without a
+    trailing `LIKE '...'` clause.
 
     Detected from the parsed statement, not a regex over the raw text: a
     leading comment (`/* x */ SHOW SCHEMAS`) defeats a `^\\s*SHOW` anchor
     because comments are only stripped by the tokenizer, not by string
     matching. Drill's grammar for both spellings falls back to sqlglot's
-    generic `Command`, with the target left as a `Literal` in `expression`
-    (e.g. `Command(this='SHOW', expression=Literal(this='SCHEMAS'))`).
+    generic `Command`, with the *entire remainder* of the statement left as
+    one `Literal` in `expression` (e.g. `Command(this='SHOW',
+    expression=Literal(this='SCHEMAS'))`, but equally
+    `Literal(this="SCHEMAS LIKE '%dfs%'")` or `Literal(this='/**/SCHEMAS')`
+    for `SHOW/**/SCHEMAS`). Comparing that literal whole, or even
+    stripped-and-uppercased, only matches the bare two-word spelling and lets
+    `SHOW SCHEMAS LIKE '...'` — documented Drill syntax — through unfiltered.
+    Only the first token decides it: strip block comments (the only comment
+    style that can land inside the remainder; a leading `--` comment is
+    stripped by the tokenizer before this text is ever assembled, and a
+    trailing `--` comment lands after the first token so it never affects
+    the check), then split on whitespace and compare the first word alone.
 
     Returns False rather than raising if `sql` does not parse: by the time
     this is called, `check()` has already accepted the statement, so a
@@ -118,7 +129,9 @@ def is_show_schemas(sql: str) -> bool:
         return False
     expression = statement.args.get("expression")
     target = expression.this if isinstance(expression, exp.Literal) else str(expression or "")
-    return str(target or "").strip().upper() in {"SCHEMAS", "DATABASES"}
+    without_comments = re.sub(r"/\*.*?\*/", " ", str(target or ""), flags=re.S)
+    words = without_comments.strip().split(maxsplit=1)
+    return bool(words) and words[0].upper() in {"SCHEMAS", "DATABASES"}
 
 
 def check(sql: str, policy: Policy) -> None:

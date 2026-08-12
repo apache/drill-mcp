@@ -232,6 +232,38 @@ class TestManagementTools:
         with pytest.raises(ToolError, match="REST"):
             make_tools(client).cluster_status()
 
+    @pytest.mark.parametrize(
+        "call",
+        [
+            lambda tools: tools.list_storage_plugins(),
+            lambda tools: tools.cluster_status(),
+            lambda tools: tools.list_profiles(),
+            lambda tools: tools.get_profile("abc"),
+            lambda tools: tools.cancel_query("abc"),
+        ],
+        ids=[
+            "list_storage_plugins",
+            "cluster_status",
+            "list_profiles",
+            "get_profile",
+            "cancel_query",
+        ],
+    )
+    def test_every_management_tool_is_unavailable_on_a_client_without_it(self, call):
+        # get_profile/cancel_query run their own isinstance validation on
+        # query_id before touching the client, so a valid string argument is
+        # used here to make sure that validation doesn't mask the missing
+        # REST endpoint being detected first.
+        client = MagicMock(spec=["query", "schemas", "tables", "columns"])
+        with pytest.raises(ToolError, match="REST"):
+            call(make_tools(client))
+
+    def test_list_storage_plugins_skips_non_dict_entries_rather_than_crashing(self):
+        client = MagicMock()
+        client.storage_plugins.return_value = ["not-a-dict", {"name": "dfs"}]
+        result = make_tools(client).list_storage_plugins()
+        assert [p["name"] for p in result] == ["dfs"]
+
     def test_drill_errors_become_tool_errors(self):
         client = MagicMock()
         client.profile.side_effect = DrillError("no such query")
@@ -318,7 +350,7 @@ class TestShowFiltering:
         )
         assert result["rows"] == [{"SCHEMA_NAME": "dfs"}]
 
-    def test_show_filtering_is_case_insensitive(self):
+    def test_show_filtering_is_case_insensitive_lowercase(self):
         client = MagicMock()
         client.query.return_value = QueryResult(
             ["SCHEMA_NAME"],
@@ -327,6 +359,8 @@ class TestShowFiltering:
         result = make_tools(client, hidden_schemas=["sys"]).run_query("show schemas")
         assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
 
+    def test_show_filtering_is_case_insensitive_mixed_case(self):
+        client = MagicMock()
         client.query.return_value = QueryResult(
             ["SCHEMA_NAME"],
             [{"SCHEMA_NAME": "sys"}, {"SCHEMA_NAME": "dfs.tmp"}],
@@ -343,3 +377,75 @@ class TestShowFiltering:
         )
         result = make_tools(client, hidden_schemas=["sys"]).run_query("SHOW TABLES")
         assert result["rows"] == [{"TABLE_NAME": "sys"}]
+
+    def test_show_tables_like_rows_are_not_filtered(self):
+        """A trailing LIKE clause must not make SHOW TABLES look like a schema
+        listing either."""
+        client = MagicMock()
+        client.query.return_value = QueryResult(
+            ["TABLE_NAME"], [{"TABLE_NAME": "sys"}]
+        )
+        result = make_tools(client, hidden_schemas=["sys"]).run_query(
+            "SHOW TABLES LIKE '%s%'"
+        )
+        assert result["rows"] == [{"TABLE_NAME": "sys"}]
+
+    def test_show_schemas_like_rows_are_filtered(self):
+        """Regression test: `SHOW SCHEMAS LIKE '...'` is documented Drill
+        syntax. sqlglot's Command fallback swallows the whole remainder
+        (`SCHEMAS LIKE '%dfs%'`) into a single literal, so comparing that
+        literal whole (or even stripped-and-uppercased) only matches the bare
+        two-word spelling and lets this form through unfiltered."""
+        client = MagicMock()
+        client.query.return_value = QueryResult(
+            ["SCHEMA_NAME"],
+            [{"SCHEMA_NAME": "sys"}, {"SCHEMA_NAME": "dfs.tmp"}],
+        )
+        result = make_tools(client, hidden_schemas=["sys"]).run_query(
+            "SHOW SCHEMAS LIKE '%s%'"
+        )
+        assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
+
+    def test_show_databases_like_rows_are_filtered(self):
+        client = MagicMock()
+        client.query.return_value = QueryResult(
+            ["SCHEMA_NAME"],
+            [{"SCHEMA_NAME": "INFORMATION_SCHEMA"}, {"SCHEMA_NAME": "dfs"}],
+        )
+        result = make_tools(client, hidden_schemas=["INFORMATION_SCHEMA"]).run_query(
+            "SHOW DATABASES LIKE '%y%'"
+        )
+        assert result["rows"] == [{"SCHEMA_NAME": "dfs"}]
+
+    def test_show_schemas_with_trailing_block_comment_is_still_filtered(self):
+        client = MagicMock()
+        client.query.return_value = QueryResult(
+            ["SCHEMA_NAME"],
+            [{"SCHEMA_NAME": "sys"}, {"SCHEMA_NAME": "dfs.tmp"}],
+        )
+        result = make_tools(client, hidden_schemas=["sys"]).run_query(
+            "SHOW SCHEMAS /* trailing */"
+        )
+        assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
+
+    def test_show_schemas_with_no_whitespace_before_comment_is_still_filtered(self):
+        client = MagicMock()
+        client.query.return_value = QueryResult(
+            ["SCHEMA_NAME"],
+            [{"SCHEMA_NAME": "sys"}, {"SCHEMA_NAME": "dfs.tmp"}],
+        )
+        result = make_tools(client, hidden_schemas=["sys"]).run_query(
+            "SHOW/**/SCHEMAS"
+        )
+        assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
+
+    def test_row_that_is_not_a_dict_does_not_crash_filtering(self):
+        """A malformed row must not raise a raw AttributeError out of the
+        filter; it should simply be treated as not identifiable and dropped
+        rather than crashing the whole call."""
+        client = MagicMock()
+        client.query.return_value = QueryResult(
+            ["SCHEMA_NAME"], ["not-a-dict", {"SCHEMA_NAME": "dfs.tmp"}]
+        )
+        result = make_tools(client, hidden_schemas=["sys"]).run_query("SHOW SCHEMAS")
+        assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]

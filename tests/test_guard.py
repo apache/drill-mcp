@@ -369,6 +369,46 @@ class TestIsShowSchemas:
     def test_empty_sql_returns_false(self):
         assert is_show_schemas("") is False
 
+    def test_show_schemas_with_like_clause_matches(self):
+        """Regression test: sqlglot's Command fallback swallows the entire
+        remainder after SHOW into one literal, so `SCHEMAS LIKE '%dfs%'` must
+        be recognised by its first token, not by comparing the literal as a
+        whole (which only matches the bare two-word spelling)."""
+        assert is_show_schemas("SHOW SCHEMAS LIKE '%dfs%'") is True
+
+    def test_show_databases_with_like_clause_matches(self):
+        assert is_show_schemas("SHOW DATABASES LIKE '%y%'") is True
+
+    def test_show_tables_with_like_clause_does_not_match(self):
+        assert is_show_schemas("SHOW TABLES LIKE '%x%'") is False
+
+    def test_show_schemas_with_trailing_block_comment_matches(self):
+        assert is_show_schemas("SHOW SCHEMAS /* trailing */") is True
+
+    def test_show_schemas_with_no_space_before_comment_matches(self):
+        assert is_show_schemas("SHOW/**/SCHEMAS") is True
+
+    def test_show_schemas_with_trailing_semicolon_matches(self):
+        assert is_show_schemas("SHOW SCHEMAS;") is True
+
+    def test_show_schemas_with_trailing_line_comment_matches(self):
+        assert is_show_schemas("SHOW SCHEMAS -- trailing comment") is True
+
+    def test_raw_regex_would_have_missed_the_like_clause(self):
+        """Documents the exact failure mode this class regression-tests: the
+        brief's original `^\\s*SHOW\\s+(SCHEMAS|DATABASES)\\b` regex matches
+        the bare spelling but the naive fix of comparing the whole Command
+        literal against {"SCHEMAS", "DATABASES"} also fails on this input,
+        because the literal for `SHOW SCHEMAS LIKE '%dfs%'` is the full
+        string `"SCHEMAS LIKE '%dfs%'"`, not `"SCHEMAS"`.
+        """
+        whole_literal_equality = "SCHEMAS LIKE '%dfs%'".strip().upper() in {
+            "SCHEMAS",
+            "DATABASES",
+        }
+        assert whole_literal_equality is False
+        assert is_show_schemas("SHOW SCHEMAS LIKE '%dfs%'") is True
+
 
 class TestCoverageGaps:
     """Exercises branches not reached by the scenarios above, so guard.py stays
