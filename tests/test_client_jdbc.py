@@ -60,6 +60,19 @@ def test_connect_uses_the_configured_driver_and_url(fake_jaydebeapi):
     assert args.kwargs["jars"] == ["/opt/drill-jdbc-all.jar"]
 
 
+def test_jdbc_url_drops_userinfo_from_a_url_that_embeds_credentials(fake_jaydebeapi):
+    # config.url is free-form and unvalidated; nothing stops
+    # DRILL_URL=http://alice:s3cret@drill:8047. The JDBC connection string
+    # must be built from hostname/port only, never from `netloc` (which
+    # includes "alice:s3cret@"), or the password ends up in the connection
+    # string and from there in any driver error that echoes it.
+    make_client(url="http://alice:s3cret@drill:8047").query("SELECT 1", max_rows=1)
+    url = fake_jaydebeapi.connect.call_args.args[1]
+    assert url == "jdbc:drill:drillbit=drill:8047"
+    assert "s3cret" not in url
+    assert "alice" not in url
+
+
 def test_query_returns_columns_and_rows(fake_jaydebeapi):
     result = make_client().query("SELECT 1", max_rows=10)
     assert result.columns == ["a", "b"]
@@ -97,6 +110,8 @@ def test_schemas_uses_information_schema(fake_jaydebeapi):
     cursor.description = [("SCHEMA_NAME", None), ("TYPE", None)]
     cursor.fetchmany.return_value = [("dfs.tmp", "file")]
     assert make_client().schemas() == [{"name": "dfs.tmp", "type": "file"}]
+    sql = cursor.execute.call_args.args[0]
+    assert "INFORMATION_SCHEMA" in sql
 
 
 def test_tables_rejects_injection(fake_jaydebeapi):
@@ -125,13 +140,36 @@ def test_driver_error_does_not_leak_the_password(fake_jaydebeapi):
     fake_jaydebeapi.connect.side_effect = RuntimeError("auth failed for user alice/s3cret")
     with pytest.raises(DrillError) as exc_info:
         make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
-    # DrillError wraps whatever the driver reports; the client itself must
-    # never independently add the password into the message. This asserts
-    # the message is exactly the driver's own text, not a client-composed
-    # string that embeds config.password.
-    assert str(exc_info.value) == (
-        "could not connect to Drill over JDBC: auth failed for user alice/s3cret"
+    message = str(exc_info.value)
+    # The driver's exception text can itself contain the password we passed
+    # to jaydebeapi.connect() (e.g. an auth-failure message that echoes its
+    # arguments). The wrapper must scrub it, not merely avoid adding it a
+    # second time.
+    assert "s3cret" not in message
+    # The wrapper must still be informative: the non-secret part of the
+    # driver's text survives, just with the password redacted.
+    assert "auth failed for user alice/***REDACTED***" in message
+
+
+def test_query_error_does_not_leak_the_password(fake_jaydebeapi):
+    cursor = fake_jaydebeapi.connect.return_value.cursor.return_value
+    cursor.execute.side_effect = RuntimeError("query failed: password was s3cret")
+    with pytest.raises(DrillError) as exc_info:
+        make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+    assert "s3cret" not in str(exc_info.value)
+
+
+def test_close_error_does_not_leak_the_password(fake_jaydebeapi):
+    client = make_client(auth="basic", user="alice", password="s3cret")
+    client.query("SELECT 1", max_rows=1)
+    fake_jaydebeapi.connect.return_value.close.side_effect = RuntimeError(
+        "close failed: password was s3cret"
     )
+    with pytest.raises(DrillError) as exc_info:
+        client.close()
+    assert "s3cret" not in str(exc_info.value)
+    # The stale handle must not linger after a failed close.
+    assert client._connection is None
 
 
 def test_management_methods_are_not_implemented(fake_jaydebeapi):

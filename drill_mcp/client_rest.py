@@ -210,6 +210,9 @@ def _error_text(response: httpx.Response) -> str:
 # so `JdbcClient` can share the exact same identifier-quoting and file-plugin
 # branching instead of duplicating ~80 lines of security-relevant logic.
 
+# Called positionally as `query(sql, max_rows)`, not with keyword arguments --
+# RestClient.query and JdbcClient.query both accept `max_rows` positionally,
+# but a bound method's parameter name is not part of `Callable`'s contract.
 Query = Callable[[str, int], QueryResult]
 
 

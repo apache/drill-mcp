@@ -28,6 +28,7 @@ so `JdbcClient` deliberately does not implement `storage_plugins`,
 
 from __future__ import annotations
 
+from contextlib import closing
 from typing import Any
 from urllib.parse import urlparse
 
@@ -52,16 +53,37 @@ class JdbcClient:
     # -- connection --------------------------------------------------------
 
     def _jdbc_url(self) -> str:
-        # Credentials are never embedded in the URL -- they are passed to
-        # jaydebeapi.connect() as a separate argument (see _connect below) --
-        # so this string, and anything derived from it in an error message,
-        # cannot leak the password.
-        host = urlparse(self._config.url)
-        netloc = host.netloc or host.path
+        # Built from hostname/port ONLY -- never `netloc`, which for a URL
+        # like "http://alice:s3cret@drill:8047" includes the userinfo
+        # ("alice:s3cret@drill:8047"). config.url is free-form and
+        # unvalidated, so a password embedded there must never reach the
+        # connection string, or it becomes reachable through a driver
+        # exception that echoes its arguments back (see _scrub, which
+        # handles the remaining case: the driver echoing the password we
+        # pass to jaydebeapi.connect() separately, below).
+        parsed = urlparse(self._config.url)
+        host = parsed.hostname or parsed.path
+        netloc = f"{host}:{parsed.port}" if parsed.port else host
         url = f"jdbc:drill:drillbit={netloc}"
         if self._config.auth == "kerberos":
             url += ";auth=kerberos"
         return url
+
+    def _scrub(self, text: str) -> str:
+        """Remove the configured password from driver-supplied error text.
+
+        `redact()` in `client_rest.py` doesn't apply here -- it's key-based
+        over dicts/lists/tuples and passes a bare `str` through unchanged.
+        The driver's exception text is exactly that: a bare string we do not
+        control, and it can contain the password we handed to
+        `jaydebeapi.connect()` (e.g. an auth-failure message that echoes its
+        arguments) or, via the JDBC URL, one a caller embedded in `config.url`
+        as userinfo despite `_jdbc_url` no longer forwarding it verbatim.
+        """
+        password = self._config.password
+        if password:
+            text = text.replace(password, "***REDACTED***")
+        return text
 
     def _connect(self) -> Any:
         if self._connection is not None:
@@ -72,10 +94,6 @@ class JdbcClient:
             raise DrillError(
                 "the JDBC backend requires the jdbc extra: pip install drill-mcp[jdbc]"
             ) from exc
-        if jaydebeapi is None:
-            raise DrillError(
-                "the JDBC backend requires the jdbc extra: pip install drill-mcp[jdbc]"
-            )
         credentials = (
             [self._config.user, self._config.password]
             if self._config.auth == "basic"
@@ -89,15 +107,21 @@ class JdbcClient:
                 jars=[self._config.jdbc_driver_path],
             )
         except Exception as exc:
-            # `exc` is whatever the driver reports; it is never supplemented
-            # here with the URL or credentials, so this message can only leak
-            # a credential if the driver itself already put one in `exc`.
-            raise DrillError(f"could not connect to Drill over JDBC: {exc}") from exc
+            raise DrillError(
+                f"could not connect to Drill over JDBC: {self._scrub(str(exc))}"
+            ) from exc
         return self._connection
 
     def close(self) -> None:
-        if self._connection is not None:
+        if self._connection is None:
+            return
+        try:
             self._connection.close()
+        except Exception as exc:
+            raise DrillError(
+                f"could not close the JDBC connection: {self._scrub(str(exc))}"
+            ) from exc
+        finally:
             self._connection = None
 
     # -- queries -------------------------------------------------------------
@@ -105,18 +129,16 @@ class JdbcClient:
     def query(self, sql: str, max_rows: int) -> QueryResult:
         connection = self._connect()
         try:
-            cursor = connection.cursor()
-            cursor.execute(sql)
-            rows = cursor.fetchmany(max_rows)
-            columns = [description[0] for description in cursor.description or []]
-        except DrillError:
-            raise
+            with closing(connection.cursor()) as cursor:
+                cursor.execute(sql)
+                rows = cursor.fetchmany(max_rows)
+                columns = [description[0] for description in cursor.description or []]
         except Exception as exc:
-            raise DrillError(str(exc)) from exc
+            raise DrillError(self._scrub(str(exc))) from exc
         return QueryResult(
             columns=columns,
             rows=[dict(zip(columns, row)) for row in rows],
-            truncated=len(rows) >= max_rows,
+            truncated=max_rows > 0 and len(rows) >= max_rows,
         )
 
     # -- metadata --------------------------------------------------------------
