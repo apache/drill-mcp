@@ -42,6 +42,11 @@ def test_redacts_all_sensitive_key_patterns():
 
 
 def test_leaves_innocuous_keys_alone():
+    # Deliberately no embedded credentials here (no "user:pass@" in the
+    # value) -- this is still a value redact() must leave alone. The case
+    # where a value under an innocuous key DOES carry a secret (userinfo, a
+    # password= query parameter) is covered separately below; that shape
+    # used to be left alone too, which was the bug.
     assert redact({"type": "file", "connection": "s3a://bucket"}) == {
         "type": "file",
         "connection": "s3a://bucket",
