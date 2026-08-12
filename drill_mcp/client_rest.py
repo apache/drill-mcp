@@ -28,6 +28,7 @@ itself.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -175,6 +176,119 @@ def _error_text(response: httpx.Response) -> str:
     return message or f"Drill returned HTTP {response.status_code}"
 
 
+# -- metadata -----------------------------------------------------------
+#
+# Pure SQL-building plus row-mapping over a `query` callable -- no transport
+# concerns. Extracted to module level (rather than left as RestClient methods)
+# so `JdbcClient` can share the exact same identifier-quoting and file-plugin
+# branching instead of duplicating ~80 lines of security-relevant logic.
+
+Query = Callable[[str, int], QueryResult]
+
+
+def fetch_plugin_type(query: Query, schema: str) -> str | None:
+    """Return the storage plugin TYPE backing `schema`, or None if unknown.
+
+    File-based plugins (`dfs`, `s3`) do not register their contents in
+    INFORMATION_SCHEMA, so `fetch_tables` and `fetch_columns` must branch on
+    this.
+    """
+    result = query(
+        "SELECT SCHEMA_NAME, TYPE FROM INFORMATION_SCHEMA.`SCHEMATA` "
+        f"WHERE SCHEMA_NAME = {quote_literal_path(schema)}",
+        1,
+    )
+    return result.rows[0].get("TYPE") if result.rows else None
+
+
+def fetch_schemas(query: Query) -> list[dict[str, Any]]:
+    result = query(
+        "SELECT SCHEMA_NAME, TYPE FROM INFORMATION_SCHEMA.`SCHEMATA` "
+        "ORDER BY SCHEMA_NAME",
+        10_000,
+    )
+    return [
+        {"name": row.get("SCHEMA_NAME"), "type": row.get("TYPE")}
+        for row in result.rows
+    ]
+
+
+def fetch_tables(query: Query, schema: str) -> list[dict[str, Any]]:
+    # File plugins are absent from INFORMATION_SCHEMA.`TABLES`; querying it
+    # for `dfs.tmp` returns an empty list that looks like an empty workspace.
+    # `SHOW FILES` is the only way to enumerate them. sqlalchemy-drill's
+    # get_table_names branches the same way.
+    if fetch_plugin_type(query, schema) == "file":
+        result = query(f"SHOW FILES FROM {quote_identifier_path(schema)}", 10_000)
+        tables: list[dict[str, Any]] = []
+        for row in result.rows:
+            name = row.get("name")
+            if not name:
+                continue
+            # Drill stores a view as a `<name>.view.drill` file in the workspace.
+            if name.endswith(".view.drill"):
+                tables.append({"name": name[: -len(".view.drill")], "type": "VIEW"})
+            else:
+                is_dir = str(row.get("isDirectory", "")).lower() == "true"
+                tables.append({"name": name, "type": "DIRECTORY" if is_dir else "TABLE"})
+        return sorted(tables, key=lambda t: t["name"])
+
+    result = query(
+        "SELECT TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.`TABLES` "
+        f"WHERE TABLE_SCHEMA = {quote_literal_path(schema)} ORDER BY TABLE_NAME",
+        10_000,
+    )
+    return [
+        {"name": row.get("TABLE_NAME"), "type": row.get("TABLE_TYPE")}
+        for row in result.rows
+    ]
+
+
+def fetch_columns(query: Query, schema: str, table: str) -> list[dict[str, Any]]:
+    # Validate the table name up front, before the plugin_type lookup fires
+    # a query: an invalid table name should never make it to the network.
+    # `_FILE_IDENTIFIER` (not `_IDENTIFIER`) because file-plugin table
+    # names are filenames and may contain a literal "." (e.g. "sales.csv")
+    # as ONE identifier -- see `quote_identifier`.
+    if not _FILE_IDENTIFIER.fullmatch(table):
+        raise DrillError(f"invalid identifier: {table!r}")
+
+    # Same split: file plugins have dynamic schemas and no
+    # INFORMATION_SCHEMA.`COLUMNS` rows. DESCRIBE is metadata-only --
+    # deliberately NOT a `SELECT * ... LIMIT 1` probe, which would read user
+    # data to answer a metadata question.
+    if fetch_plugin_type(query, schema) == "file":
+        # `table` is ONE identifier (a filename), not a further dotted
+        # path -- quote it with `quote_identifier`, not
+        # `quote_identifier_path`, or "sales.csv" would be split into a
+        # schema segment "sales" and a table segment "csv".
+        target = f"{quote_identifier_path(schema)}.{quote_identifier(table)}"
+        result = query(f"DESCRIBE {target}", 10_000)
+        return [
+            {
+                "name": row.get("COLUMN_NAME"),
+                "data_type": row.get("DATA_TYPE"),
+                "nullable": str(row.get("IS_NULLABLE", "")).upper() == "YES",
+            }
+            for row in result.rows
+        ]
+
+    result = query(
+        "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM INFORMATION_SCHEMA.`COLUMNS` "
+        f"WHERE TABLE_SCHEMA = {quote_literal_path(schema)} "
+        f"AND TABLE_NAME = {quote_literal(table)} ORDER BY ORDINAL_POSITION",
+        10_000,
+    )
+    return [
+        {
+            "name": row.get("COLUMN_NAME"),
+            "data_type": row.get("DATA_TYPE"),
+            "nullable": str(row.get("IS_NULLABLE", "")).upper() == "YES",
+        }
+        for row in result.rows
+    ]
+
+
 # -- client --------------------------------------------------------------
 
 
@@ -294,15 +408,7 @@ class RestClient:
     # -- metadata ----------------------------------------------------------
 
     def schemas(self) -> list[dict[str, Any]]:
-        result = self.query(
-            "SELECT SCHEMA_NAME, TYPE FROM INFORMATION_SCHEMA.SCHEMATA "
-            "ORDER BY SCHEMA_NAME",
-            max_rows=10_000,
-        )
-        return [
-            {"name": row.get("SCHEMA_NAME"), "type": row.get("TYPE")}
-            for row in result.rows
-        ]
+        return fetch_schemas(self.query)
 
     def plugin_type(self, schema: str) -> str | None:
         """Return the storage plugin TYPE backing `schema`, or None if unknown.
@@ -310,88 +416,13 @@ class RestClient:
         File-based plugins (`dfs`, `s3`) do not register their contents in
         INFORMATION_SCHEMA, so `tables` and `columns` must branch on this.
         """
-        result = self.query(
-            "SELECT SCHEMA_NAME, TYPE FROM INFORMATION_SCHEMA.`SCHEMATA` "
-            f"WHERE SCHEMA_NAME = {quote_literal_path(schema)}",
-            max_rows=1,
-        )
-        return result.rows[0].get("TYPE") if result.rows else None
+        return fetch_plugin_type(self.query, schema)
 
     def tables(self, schema: str) -> list[dict[str, Any]]:
-        # File plugins are absent from INFORMATION_SCHEMA.`TABLES`; querying it
-        # for `dfs.tmp` returns an empty list that looks like an empty workspace.
-        # `SHOW FILES` is the only way to enumerate them. sqlalchemy-drill's
-        # get_table_names branches the same way.
-        if self.plugin_type(schema) == "file":
-            result = self.query(
-                f"SHOW FILES FROM {quote_identifier_path(schema)}", max_rows=10_000
-            )
-            tables: list[dict[str, Any]] = []
-            for row in result.rows:
-                name = row.get("name")
-                if not name:
-                    continue
-                # Drill stores a view as a `<name>.view.drill` file in the workspace.
-                if name.endswith(".view.drill"):
-                    tables.append({"name": name[: -len(".view.drill")], "type": "VIEW"})
-                else:
-                    is_dir = str(row.get("isDirectory", "")).lower() == "true"
-                    tables.append({"name": name, "type": "DIRECTORY" if is_dir else "TABLE"})
-            return sorted(tables, key=lambda t: t["name"])
-
-        result = self.query(
-            "SELECT TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.`TABLES` "
-            f"WHERE TABLE_SCHEMA = {quote_literal_path(schema)} ORDER BY TABLE_NAME",
-            max_rows=10_000,
-        )
-        return [
-            {"name": row.get("TABLE_NAME"), "type": row.get("TABLE_TYPE")}
-            for row in result.rows
-        ]
+        return fetch_tables(self.query, schema)
 
     def columns(self, schema: str, table: str) -> list[dict[str, Any]]:
-        # Validate the table name up front, before the plugin_type lookup fires
-        # a query: an invalid table name should never make it to the network.
-        # `_FILE_IDENTIFIER` (not `_IDENTIFIER`) because file-plugin table
-        # names are filenames and may contain a literal "." (e.g. "sales.csv")
-        # as ONE identifier -- see `quote_identifier`.
-        if not _FILE_IDENTIFIER.fullmatch(table):
-            raise DrillError(f"invalid identifier: {table!r}")
-
-        # Same split: file plugins have dynamic schemas and no
-        # INFORMATION_SCHEMA.`COLUMNS` rows. DESCRIBE is metadata-only --
-        # deliberately NOT a `SELECT * ... LIMIT 1` probe, which would read user
-        # data to answer a metadata question.
-        if self.plugin_type(schema) == "file":
-            # `table` is ONE identifier (a filename), not a further dotted
-            # path -- quote it with `quote_identifier`, not
-            # `quote_identifier_path`, or "sales.csv" would be split into a
-            # schema segment "sales" and a table segment "csv".
-            target = f"{quote_identifier_path(schema)}.{quote_identifier(table)}"
-            result = self.query(f"DESCRIBE {target}", max_rows=10_000)
-            return [
-                {
-                    "name": row.get("COLUMN_NAME"),
-                    "data_type": row.get("DATA_TYPE"),
-                    "nullable": str(row.get("IS_NULLABLE", "")).upper() == "YES",
-                }
-                for row in result.rows
-            ]
-
-        result = self.query(
-            "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM INFORMATION_SCHEMA.`COLUMNS` "
-            f"WHERE TABLE_SCHEMA = {quote_literal_path(schema)} "
-            f"AND TABLE_NAME = {quote_literal(table)} ORDER BY ORDINAL_POSITION",
-            max_rows=10_000,
-        )
-        return [
-            {
-                "name": row.get("COLUMN_NAME"),
-                "data_type": row.get("DATA_TYPE"),
-                "nullable": str(row.get("IS_NULLABLE", "")).upper() == "YES",
-            }
-            for row in result.rows
-        ]
+        return fetch_columns(self.query, schema, table)
 
     # -- management --------------------------------------------------------
 
