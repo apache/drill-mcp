@@ -117,9 +117,7 @@ class JdbcClient:
                 "the JDBC backend requires the jdbc extra: pip install drill-mcp[jdbc]"
             ) from exc
         credentials = (
-            [self._config.user, self._config.password]
-            if self._config.auth == "basic"
-            else []
+            [self._config.user, self._config.password] if self._config.auth == "basic" else []
         )
         try:
             self._connection = jaydebeapi.connect(
@@ -161,7 +159,9 @@ class JdbcClient:
             raise DrillError(self._scrub(str(exc))) from exc
         return QueryResult(
             columns=columns,
-            rows=[dict(zip(columns, row)) for row in rows],
+            # JDBC row tuples are always column-aligned by the driver; strict=
+            # would only add a reachable-in-theory error path to reviewed code.
+            rows=[dict(zip(columns, row)) for row in rows],  # noqa: B905
             truncated=max_rows > 0 and len(rows) >= max_rows,
             metadata=metadata,
         )

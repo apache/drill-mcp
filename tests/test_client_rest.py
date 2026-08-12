@@ -65,7 +65,8 @@ class TestQuoting:
             "foo\\bar",
             "foo`bar",
             "dfs.tmp",
-            "foo\n",  # trailing newline: `$` matches before it under .match(), not under .fullmatch()
+            # trailing newline: `$` matches before it under .match(), not under .fullmatch()
+            "foo\n",
         ],
     )
     def test_literal_rejects_dangerous_input(self, bad):
@@ -173,7 +174,9 @@ class TestQuery:
     @respx.mock
     def test_drill_error_text_is_surfaced(self):
         respx.post(f"{BASE}/query.json").mock(
-            return_value=httpx.Response(500, json={"errorMessage": "VALIDATION ERROR: no such table"})
+            return_value=httpx.Response(
+                500, json={"errorMessage": "VALIDATION ERROR: no such table"}
+            )
         )
         with pytest.raises(DrillError, match="no such table"):
             make_client().query("SELECT * FROM nope", max_rows=10)
@@ -249,7 +252,9 @@ class TestBasicAuth:
                 httpx.Response(200, json={"columns": ["a"], "rows": []}),
             ]
         )
-        result = make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+        result = make_client(auth="basic", user="alice", password="s3cret").query(
+            "SELECT 1", max_rows=1
+        )
         assert result.columns == ["a"]
         assert login.call_count == 2
         assert query.call_count == 2
@@ -323,8 +328,7 @@ class TestBasicAuth:
             return_value=httpx.Response(
                 200,
                 text=(
-                    "<div>Warning: 1 < 2 in the system. "
-                    "Invalid username/password credentials</div>"
+                    "<div>Warning: 1 < 2 in the system. Invalid username/password credentials</div>"
                 ),
             )
         )
@@ -362,7 +366,9 @@ class TestBasicAuth:
         respx.post(f"{BASE}/query.json").mock(
             return_value=httpx.Response(200, json={"columns": ["a"], "rows": []})
         )
-        result = make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+        result = make_client(auth="basic", user="alice", password="s3cret").query(
+            "SELECT 1", max_rows=1
+        )
         assert login.called
         assert result.columns == ["a"]
 
@@ -379,7 +385,9 @@ class TestBasicAuth:
         respx.post(f"{BASE}/query.json").mock(
             return_value=httpx.Response(200, json={"columns": ["a"], "rows": []})
         )
-        result = make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+        result = make_client(auth="basic", user="alice", password="s3cret").query(
+            "SELECT 1", max_rows=1
+        )
         assert login.called
         assert result.columns == ["a"]
 
@@ -547,14 +555,18 @@ class TestFilePluginMetadata:
 
     @staticmethod
     def _schemata(plugin_type):
-        return query_response(["SCHEMA_NAME", "TYPE"], [{"SCHEMA_NAME": "dfs.tmp", "TYPE": plugin_type}])
+        return query_response(
+            ["SCHEMA_NAME", "TYPE"], [{"SCHEMA_NAME": "dfs.tmp", "TYPE": plugin_type}]
+        )
 
     @respx.mock
     def test_tables_uses_show_files_for_a_file_plugin(self):
         route = respx.post(f"{BASE}/query.json").mock(
             side_effect=[
                 self._schemata("file"),
-                query_response(["name", "isDirectory"], [{"name": "sales.csv", "isDirectory": "false"}]),
+                query_response(
+                    ["name", "isDirectory"], [{"name": "sales.csv", "isDirectory": "false"}]
+                ),
             ]
         )
         assert make_client().tables("dfs.tmp") == [{"name": "sales.csv", "type": "TABLE"}]
@@ -565,7 +577,9 @@ class TestFilePluginMetadata:
         respx.post(f"{BASE}/query.json").mock(
             side_effect=[
                 self._schemata("file"),
-                query_response(["name", "isDirectory"], [{"name": "year=2024", "isDirectory": "true"}]),
+                query_response(
+                    ["name", "isDirectory"], [{"name": "year=2024", "isDirectory": "true"}]
+                ),
             ]
         )
         assert make_client().tables("dfs.tmp")[0]["type"] == "DIRECTORY"
@@ -575,7 +589,10 @@ class TestFilePluginMetadata:
         respx.post(f"{BASE}/query.json").mock(
             side_effect=[
                 self._schemata("file"),
-                query_response(["name", "isDirectory"], [{"name": "top_sales.view.drill", "isDirectory": "false"}]),
+                query_response(
+                    ["name", "isDirectory"],
+                    [{"name": "top_sales.view.drill", "isDirectory": "false"}],
+                ),
             ]
         )
         assert make_client().tables("dfs.tmp") == [{"name": "top_sales", "type": "VIEW"}]
@@ -585,7 +602,9 @@ class TestFilePluginMetadata:
         route = respx.post(f"{BASE}/query.json").mock(
             side_effect=[
                 self._schemata("jdbc"),
-                query_response(["TABLE_NAME", "TABLE_TYPE"], [{"TABLE_NAME": "t", "TABLE_TYPE": "TABLE"}]),
+                query_response(
+                    ["TABLE_NAME", "TABLE_TYPE"], [{"TABLE_NAME": "t", "TABLE_TYPE": "TABLE"}]
+                ),
             ]
         )
         assert make_client().tables("mysql.app") == [{"name": "t", "type": "TABLE"}]
@@ -673,14 +692,14 @@ class TestFilePluginMetadata:
                 httpx.Response(
                     500,
                     json={
-                        "errorMessage": "VALIDATION ERROR: Object 'sales.csv' not found within 'dfs.tmp'"
+                        "errorMessage": (
+                            "VALIDATION ERROR: Object 'sales.csv' not found within 'dfs.tmp'"
+                        )
                     },
                 ),
             ]
         )
-        with pytest.raises(
-            DrillError, match=r"Object 'sales\.csv' not found within 'dfs\.tmp'"
-        ):
+        with pytest.raises(DrillError, match=r"Object 'sales\.csv' not found within 'dfs\.tmp'"):
             make_client().columns("dfs.tmp", "sales.csv")
 
     @respx.mock

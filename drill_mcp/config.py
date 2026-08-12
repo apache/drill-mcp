@@ -68,7 +68,7 @@ class Config(BaseModel):
     jdbc_driver_path: str | None = None
 
     @model_validator(mode="after")
-    def _check_consistency(self) -> "Config":
+    def _check_consistency(self) -> Config:
         if self.auth == "basic" and not (self.user and self.password):
             raise ValueError("auth: basic requires both user and password")
         if self.backend == "jdbc" and not self.jdbc_driver_path:

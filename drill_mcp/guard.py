@@ -51,7 +51,15 @@ _READ_TYPES = (exp.Select, exp.Union, exp.Intersect, exp.Except, exp.Subquery, e
 # or `SELECT ... INTO ...`). Checking only the root type is not enough: the
 # safety property must not depend on sqlglot's Drill grammar rejecting these
 # forms outright — a write hidden deeper in the tree must still be caught.
-_EMBEDDED_WRITE_TYPES = (exp.Insert, exp.Update, exp.Delete, exp.Merge, exp.Create, exp.Drop, exp.Into)
+_EMBEDDED_WRITE_TYPES = (
+    exp.Insert,
+    exp.Update,
+    exp.Delete,
+    exp.Merge,
+    exp.Create,
+    exp.Drop,
+    exp.Into,
+)
 
 # EXPLAIN unwraps its body and re-checks it recursively; this bounds
 # `EXPLAIN EXPLAIN EXPLAIN ...` so a malicious input cannot blow the stack.
@@ -68,7 +76,7 @@ class Policy:
     hidden_schemas: tuple[str, ...] = ()
 
     @classmethod
-    def from_config(cls, cfg) -> "Policy":
+    def from_config(cls, cfg) -> Policy:
         return cls(
             writable_plugins=tuple(cfg.writable_plugins),
             hidden_schemas=tuple(cfg.hidden_schemas),
@@ -154,9 +162,7 @@ def _check(sql: str, policy: Policy, depth: int) -> None:
         ) from exc
 
     if len(statements) != 1:
-        raise PolicyError(
-            f"exactly one statement per call is permitted, got {len(statements)}"
-        )
+        raise PolicyError(f"exactly one statement per call is permitted, got {len(statements)}")
 
     statement = statements[0]
     _check_hidden(statement, policy)

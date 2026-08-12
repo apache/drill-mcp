@@ -53,9 +53,7 @@ class TestRunQuery:
         # is the last chokepoint before the model, so it must not simply
         # trust whatever the client hands back.
         client = MagicMock()
-        client.query.return_value = QueryResult(
-            ["a"], [{"a": i} for i in range(10)], "q1", False
-        )
+        client.query.return_value = QueryResult(["a"], [{"a": i} for i in range(10)], "q1", False)
         result = make_tools(client, max_rows=3).run_query("SELECT 1")
         assert len(result["rows"]) == 3
         assert result["rows"] == [{"a": 0}, {"a": 1}, {"a": 2}]
@@ -373,9 +371,7 @@ class TestShowFiltering:
 
     def test_ordinary_select_rows_are_not_filtered(self):
         client = MagicMock()
-        client.query.return_value = QueryResult(
-            ["SCHEMA_NAME"], [{"SCHEMA_NAME": "sys"}]
-        )
+        client.query.return_value = QueryResult(["SCHEMA_NAME"], [{"SCHEMA_NAME": "sys"}])
         result = make_tools(client, hidden_schemas=["sys"]).run_query(
             "SELECT SCHEMA_NAME FROM dfs.tmp.notes"
         )
@@ -396,9 +392,7 @@ class TestShowFiltering:
             ["SCHEMA_NAME"],
             [{"SCHEMA_NAME": "sys"}, {"SCHEMA_NAME": "dfs.tmp"}],
         )
-        result = make_tools(client, hidden_schemas=["sys"]).run_query(
-            "/* x */ SHOW SCHEMAS"
-        )
+        result = make_tools(client, hidden_schemas=["sys"]).run_query("/* x */ SHOW SCHEMAS")
         assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
 
     def test_show_databases_with_leading_line_comment_is_still_filtered(self):
@@ -451,9 +445,7 @@ class TestShowFiltering:
         client.query.return_value = QueryResult(
             ["TABLE_NAME"], [{"TABLE_NAME": "sys"}, {"TABLE_NAME": "orders"}]
         )
-        result = make_tools(client, hidden_schemas=["sys"]).run_query(
-            "SHOW TABLES LIKE '%s%'"
-        )
+        result = make_tools(client, hidden_schemas=["sys"]).run_query("SHOW TABLES LIKE '%s%'")
         assert result["rows"] == [{"TABLE_NAME": "orders"}]
 
     def test_show_schemas_like_rows_are_filtered(self):
@@ -468,9 +460,7 @@ class TestShowFiltering:
             ["SCHEMA_NAME"],
             [{"SCHEMA_NAME": "sys"}, {"SCHEMA_NAME": "dfs.tmp"}],
         )
-        result = make_tools(client, hidden_schemas=["sys"]).run_query(
-            "SHOW SCHEMAS LIKE '%s%'"
-        )
+        result = make_tools(client, hidden_schemas=["sys"]).run_query("SHOW SCHEMAS LIKE '%s%'")
         assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
 
     def test_show_databases_like_rows_are_filtered(self):
@@ -490,9 +480,7 @@ class TestShowFiltering:
             ["SCHEMA_NAME"],
             [{"SCHEMA_NAME": "sys"}, {"SCHEMA_NAME": "dfs.tmp"}],
         )
-        result = make_tools(client, hidden_schemas=["sys"]).run_query(
-            "SHOW SCHEMAS /* trailing */"
-        )
+        result = make_tools(client, hidden_schemas=["sys"]).run_query("SHOW SCHEMAS /* trailing */")
         assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
 
     def test_show_schemas_with_no_whitespace_before_comment_is_still_filtered(self):
@@ -501,9 +489,7 @@ class TestShowFiltering:
             ["SCHEMA_NAME"],
             [{"SCHEMA_NAME": "sys"}, {"SCHEMA_NAME": "dfs.tmp"}],
         )
-        result = make_tools(client, hidden_schemas=["sys"]).run_query(
-            "SHOW/**/SCHEMAS"
-        )
+        result = make_tools(client, hidden_schemas=["sys"]).run_query("SHOW/**/SCHEMAS")
         assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
 
     def test_show_schemas_with_trailing_semicolon_is_still_filtered(self):
@@ -539,9 +525,7 @@ class TestShowFiltering:
             ["SCHEMA_NAME"],
             [{"SCHEMA_NAME": "sys"}, {"SCHEMA_NAME": "dfs.tmp"}],
         )
-        result = make_tools(client, hidden_schemas=["sys"]).run_query(
-            "SHOW */ SCHEMAS"
-        )
+        result = make_tools(client, hidden_schemas=["sys"]).run_query("SHOW */ SCHEMAS")
         assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
 
     def test_row_that_is_not_a_dict_does_not_crash_filtering(self):
@@ -617,17 +601,32 @@ class TestWiring:
     def test_no_write_or_mutation_tools_are_registered(self):
         server = build_server(load_config(env={}))
         names = {tool.name for tool in server._tool_manager.list_tools()}
-        forbidden = {"create_storage_plugin", "update_storage_plugin",
-                     "delete_storage_plugin", "set_option", "alter_system"}
+        forbidden = {
+            "create_storage_plugin",
+            "update_storage_plugin",
+            "delete_storage_plugin",
+            "set_option",
+            "alter_system",
+        }
         assert not (names & forbidden)
 
     def test_no_registered_tool_accepts_a_credential_argument(self):
         """Credentials come from config or environment only, never a tool argument."""
         server = build_server(load_config(env={}))
-        credential_words = {"user", "password", "username", "passwd", "secret", "token", "credential"}
+        credential_words = {
+            "user",
+            "password",
+            "username",
+            "passwd",
+            "secret",
+            "token",
+            "credential",
+        }
         for tool in server._tool_manager.list_tools():
             params = set(tool.parameters.get("properties", {}))
-            assert not (params & credential_words), f"{tool.name} accepts {params & credential_words}"
+            assert not (params & credential_words), (
+                f"{tool.name} accepts {params & credential_words}"
+            )
 
 
 class TestMain:

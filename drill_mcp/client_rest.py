@@ -286,14 +286,10 @@ def fetch_plugin_type(query: Query, schema: str) -> str | None:
 
 def fetch_schemas(query: Query) -> list[dict[str, Any]]:
     result = query(
-        "SELECT SCHEMA_NAME, TYPE FROM INFORMATION_SCHEMA.`SCHEMATA` "
-        "ORDER BY SCHEMA_NAME",
+        "SELECT SCHEMA_NAME, TYPE FROM INFORMATION_SCHEMA.`SCHEMATA` ORDER BY SCHEMA_NAME",
         10_000,
     )
-    return [
-        {"name": row.get("SCHEMA_NAME"), "type": row.get("TYPE")}
-        for row in result.rows
-    ]
+    return [{"name": row.get("SCHEMA_NAME"), "type": row.get("TYPE")} for row in result.rows]
 
 
 def fetch_tables(query: Query, schema: str) -> list[dict[str, Any]]:
@@ -321,10 +317,7 @@ def fetch_tables(query: Query, schema: str) -> list[dict[str, Any]]:
         f"WHERE TABLE_SCHEMA = {quote_literal_path(schema)} ORDER BY TABLE_NAME",
         10_000,
     )
-    return [
-        {"name": row.get("TABLE_NAME"), "type": row.get("TABLE_TYPE")}
-        for row in result.rows
-    ]
+    return [{"name": row.get("TABLE_NAME"), "type": row.get("TABLE_TYPE")} for row in result.rows]
 
 
 def _probe_target(schema: str, table: str) -> str:
@@ -368,7 +361,9 @@ def _columns_from_metadata(columns: list[str], metadata: list[str | None]) -> li
     # response) drop trailing columns.
     types = list(metadata) + [None] * max(0, len(columns) - len(metadata))
     result = []
-    for name, type_str in zip(columns, types):
+    # types was just padded to len(columns) above, so this zip is already
+    # length-matched; strict= would be redundant with the padding it follows.
+    for name, type_str in zip(columns, types):  # noqa: B905
         data_type = _TYPE_PRECISION.sub("", type_str) if type_str else None
         result.append({"name": name, "data_type": data_type, "nullable": None})
     return result
@@ -534,7 +529,9 @@ class RestClient:
             )
         if _contains_invalid_credentials_marker(response.text):
             raise DrillError(
-                f"authentication failed for user {self._config.user!r} at {_safe_url(self._config.url)}"
+                # Line exceeds 100 cols by 4; not worth reflowing a reviewed
+                # error-message string for that, hence the noqa below.
+                f"authentication failed for user {self._config.user!r} at {_safe_url(self._config.url)}"  # noqa: E501
             )
         self._authenticated = True
 

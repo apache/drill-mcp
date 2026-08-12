@@ -210,9 +210,7 @@ class DrillTools:
             plugins = self._require_management("storage_plugins")()
         except DrillError as exc:
             raise ToolError(str(exc)) from exc
-        return [
-            p for p in plugins if isinstance(p, dict) and self._visible(p.get("name"))
-        ]
+        return [p for p in plugins if isinstance(p, dict) and self._visible(p.get("name"))]
 
     def cluster_status(self) -> dict[str, Any]:
         """Report Drillbit membership and overall cluster status."""
@@ -330,9 +328,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = _parse_args(argv)
     overrides = {
-        key: value
-        for key, value in vars(args).items()
-        if key != "config" and value is not None
+        key: value for key, value in vars(args).items() if key != "config" and value is not None
     }
     try:
         config = load_config(args.config, overrides=overrides)

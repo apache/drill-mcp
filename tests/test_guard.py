@@ -412,9 +412,7 @@ class TestCoverageGaps:
     """
 
     def test_policy_from_config(self):
-        cfg = types.SimpleNamespace(
-            writable_plugins=["dfs.tmp"], hidden_schemas=["sys"]
-        )
+        cfg = types.SimpleNamespace(writable_plugins=["dfs.tmp"], hidden_schemas=["sys"])
         policy = Policy.from_config(cfg)
         assert policy.writable_plugins == ("dfs.tmp",)
         assert policy.hidden_schemas == ("sys",)
