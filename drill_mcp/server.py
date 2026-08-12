@@ -277,13 +277,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     # sqlglot logs a WARNING-level "Falling back to parsing as a 'Command'"
-    # message for every SHOW/EXPLAIN/ALTER statement the guard parses (twice
-    # for SHOW, since the guard parses it twice). Python's logging module
-    # writes unconfigured loggers to stderr, never stdout, so this cannot
-    # corrupt the JSON-RPC session on stdio -- it is only quieted here so
-    # operators are not spammed. Configured here, not at import time: a
-    # library that reconfigures logging as a side effect of being imported
-    # is bad manners.
+    # message for every SHOW/EXPLAIN/ALTER statement the guard parses.
+    # Python's logging module writes unconfigured loggers to stderr, never
+    # stdout (verified: `logging.getLogger("sqlglot").warning(...)` with no
+    # handler configured lands only on stderr via the last-resort handler),
+    # so this cannot corrupt the JSON-RPC session on stdio -- it is only
+    # quieted here so operators are not spammed. Configured here, not at
+    # import time: a library that reconfigures logging as a side effect of
+    # being imported is bad manners.
     logging.getLogger("sqlglot").setLevel(logging.ERROR)
 
     args = _parse_args(argv)
