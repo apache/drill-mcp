@@ -97,7 +97,9 @@ class QueryResult:
     # Drill's REST API returns this in a `metadata` array (Drill >= 1.19);
     # older Drill omits it. Absent metadata is not an error -- callers that
     # need types (e.g. `_probe_columns`) must tolerate an empty list here.
-    metadata: list[str] = field(default_factory=list)
+    # `None` entries are deliberate (absent metadata, or padding for a
+    # shorter-than-`columns` array), not just an artifact of the default.
+    metadata: list[str | None] = field(default_factory=list)
 
 
 def quote_literal(value: str) -> str:
@@ -308,31 +310,6 @@ def fetch_tables(query: Query, schema: str) -> list[dict[str, Any]]:
     ]
 
 
-def fetch_view_names(query: Query, schema: str) -> list[str]:
-    """Return the names of views registered directly under `schema`.
-
-    sqlalchemy-drill's dialect uses this to pick between two different probe
-    SQL shapes in `get_columns` (base.py:423-428), because its own
-    `format_drill_table` quoting mishandles a view name. `_probe_columns`
-    below has no such failure mode (see its comment), so it does not need
-    this to build a query -- but the lookup itself is still a plugin-neutral
-    piece of Drill metadata worth exposing directly, mirroring the dialect's
-    `get_view_names` (base.py:362-372): a query failure (e.g. a Drill
-    version without the `VIEWS` INFORMATION_SCHEMA relation) is tolerated
-    and yields an empty list rather than raising. An invalid `schema` still
-    raises -- only the query itself is allowed to fail silently.
-    """
-    literal_schema = quote_literal_path(schema)  # raises on an invalid identifier
-    try:
-        result = query(
-            f"SELECT `TABLE_NAME` FROM INFORMATION_SCHEMA.`VIEWS` WHERE TABLE_SCHEMA = {literal_schema}",
-            10_000,
-        )
-    except DrillError:
-        return []
-    return [row["TABLE_NAME"] for row in result.rows if row.get("TABLE_NAME")]
-
-
 def _probe_target(schema: str, table: str) -> str:
     """Quote `schema`.`table` the same way `_describe_columns` does.
 
@@ -341,20 +318,25 @@ def _probe_target(schema: str, table: str) -> str:
     `quote_identifier` because file-plugin table names are filenames that
     may themselves contain a "." (e.g. "sales.csv") -- see `quote_identifier`.
 
-    sqlalchemy-drill's dialect instead special-cases this by counting dots
-    in `schema + "." + table` to decide where the plugin/workspace/filename
-    boundaries fall (`format_drill_table`, base.py:164-193), and for a view
-    wraps the WHOLE schema string in a single backtick pair instead
-    (base.py:425). Both produce valid SQL, but neither is needed here: this
-    codebase's identifier helpers already quote every schema segment and the
-    table/filename correctly and uniformly, for both a view and a plain
-    file, so the same quoting is reused for both `_probe_columns` branches
-    rather than replicating the dialect's ad hoc dot-counting.
+    sqlalchemy-drill's dialect instead special-cases a view's target by
+    counting dots in `schema + "." + table` to decide where the
+    plugin/workspace/filename boundaries fall (`format_drill_table`,
+    base.py:164-193): that heuristic assumes the trailing dotted token is a
+    file extension, so for `schema="dfs"`, `table="a.b"` it emits
+    ``dfs.a.`b` `` -- splitting a view name that happens to contain a dot in
+    two. The dialect's separate view branch in `get_columns`
+    (base.py:423-428) exists only to dodge that bug by wrapping the whole
+    schema string in a single backtick pair instead. `_probe_target` has no
+    such failure mode -- it quotes every schema segment and the
+    table/filename correctly and uniformly regardless of whether `table`
+    names a view or a file -- so there is no input on which the two
+    approaches disagree, and no second quoting scheme or view lookup is
+    needed here.
     """
     return f"{quote_identifier_path(schema)}.{quote_identifier(table)}"
 
 
-def _columns_from_metadata(columns: list[str], metadata: list[str]) -> list[dict[str, Any]]:
+def _columns_from_metadata(columns: list[str], metadata: list[str | None]) -> list[dict[str, Any]]:
     """Build `describe_table` rows from a probe's `columns`/`metadata`.
 
     Never reads `result.rows` -- the caller passes only `columns` and
@@ -387,28 +369,50 @@ def _probe_columns(query: Query, schema: str, table: str, plugin_type: str) -> l
     is discarded unread. That is what makes the probe acceptable here: the
     caller (`describe_table`) gets column names and types, never sampled
     values.
+
+    That same privacy property is why a probe FAILURE is handled specially
+    below, not just left to propagate: Drill's own error text for a query
+    that fails while reading a row (a type-coercion or malformed-record
+    error, for instance) can embed the offending cell's content --
+    `_error_text` passes `errorMessage` through verbatim, and `server.py`
+    surfaces `DrillError`'s text to the caller unchanged. `DESCRIBE` could
+    never trigger this path; only the probe can, so only the probe needs to
+    guard against it.
     """
     if plugin_type == "mongo":
-        # Collections carry no dots, so the combined schema.table path is
-        # quoted segment-wise like any other dotted path (base.py:420-422).
+        # MongoDB collection names CAN contain dots (e.g. "logs.2024"); this
+        # is not special-cased, so such a name is quoted the same as any
+        # other dotted path -- one backtick pair per "." segment, exactly
+        # like a schema path. sqlalchemy-drill's dialect does the same
+        # (base.py:420-422), so this is not a regression, just a limitation
+        # shared with the reference: a dotted collection name resolves to a
+        # nested path rather than one opaque identifier.
         target = quote_identifier_path(f"{schema}.{table}")
         sql = f"SELECT `**` FROM {target} LIMIT 1"
     else:
-        # sqlalchemy-drill's dialect branches here on `table in views`
-        # (base.py:423-428) because its OWN quoting -- `format_drill_table`
-        # counting dots to split plugin/workspace/filename -- mishandles a
-        # view name that doesn't fit that 2-or-3-dot shape, so it falls back
-        # to wrapping the whole schema in one backtick pair for views
-        # instead. `_probe_target` doesn't have that failure mode: it quotes
-        # every schema segment and the table/filename correctly and
-        # uniformly regardless of whether `table` names a view or a file, so
-        # there is no second quoting scheme to fall back to here. A table
-        # that happens to be a registered view is still queried by
-        # `_probe_target`, unchanged.
         target = _probe_target(schema, table)
         sql = f"SELECT * FROM {target} LIMIT 1"
 
-    result = query(sql, 1)
+    try:
+        result = query(sql, 1)
+    except DrillError as exc:
+        # Deliberately does NOT include `exc`'s text in the new message --
+        # only chains it as the cause -- because that text may be Drill's
+        # own error message, which can embed sampled cell content.
+        raise DrillError(
+            f"could not determine columns for `{schema}`.`{table}`: the probe query failed"
+        ) from exc
+
+    if not result.columns:
+        # A dynamic-schema plugin discovers columns only by reading data;
+        # zero rows means Drill never had anything to infer a schema from.
+        # Returning [] here would read exactly like the "no columns" failure
+        # mode Step 2 rejects for HTTP plugins -- fail loudly instead.
+        raise DrillError(
+            f"columns could not be determined for `{schema}`.`{table}` because "
+            "the probe returned no rows; the table may be empty."
+        )
+
     return _columns_from_metadata(result.columns, result.metadata)
 
 

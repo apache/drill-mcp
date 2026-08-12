@@ -45,6 +45,28 @@ from .config import Config
 DRIVER_CLASS = "org.apache.drill.jdbc.Driver"
 
 
+def _type_name(description_entry: tuple) -> str | None:
+    """Extract a per-column type name from one `cursor.description` entry.
+
+    `description_entry[1]` is the DB-API `type_code`. jaydebeapi's is
+    typically a `DBAPITypeObject`-like value carrying a `.values` tuple of
+    type name strings, not a bare string -- stringifying it directly (`str
+    (type_code)`) yields an object repr (`<...DBAPITypeObject object at
+    0x...>`), not a usable type name. Mirrors sqlalchemy-drill's
+    `get_columns` (base.py:433-438), which checks for `.values` the same
+    way before falling back to `str()`.
+    """
+    if len(description_entry) <= 1:
+        return None
+    type_code = description_entry[1]
+    if type_code is None:
+        return None
+    values = getattr(type_code, "values", None)
+    if values:
+        return str(values[0])
+    return str(type_code)
+
+
 class JdbcClient:
     def __init__(self, config: Config) -> None:
         self._config = config
@@ -134,15 +156,7 @@ class JdbcClient:
                 rows = cursor.fetchmany(max_rows)
                 description = cursor.description or []
                 columns = [entry[0] for entry in description]
-                # entry[1] is the DB-API type_code. jaydebeapi's is not a
-                # bare string, so it is stringified the same way the REST
-                # path's `metadata` array is consumed (client_rest.py's
-                # QueryResult.metadata docstring): a per-column type name,
-                # `None` when unknown, never an error.
-                metadata = [
-                    str(entry[1]) if len(entry) > 1 and entry[1] is not None else None
-                    for entry in description
-                ]
+                metadata = [_type_name(entry) for entry in description]
         except Exception as exc:
             raise DrillError(self._scrub(str(exc))) from exc
         return QueryResult(

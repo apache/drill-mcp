@@ -619,6 +619,58 @@ class TestFilePluginMetadata:
         assert "078-05-1120-SENTINEL" not in repr(result)
 
     @respx.mock
+    def test_columns_probe_failure_does_not_leak_drills_error_text(self):
+        # A probe reads a row -- if Drill fails WHILE reading it (a
+        # type-coercion or malformed-record error), Drill's own error text
+        # can embed the offending cell's content. DESCRIBE could never
+        # trigger this; only the probe can, so the probe's failure path must
+        # not surface Drill's raw error message.
+        respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("file"),
+                httpx.Response(
+                    500, json={"errorMessage": "conversion failed on value SENTINEL-CELL-9182"}
+                ),
+            ]
+        )
+        with pytest.raises(DrillError) as exc_info:
+            make_client().columns("dfs.tmp", "sales.csv")
+        message = str(exc_info.value)
+        assert "SENTINEL-CELL-9182" not in message
+        assert "dfs.tmp" in message
+        assert "sales.csv" in message
+        # The original Drill error is preserved as the exception chain, just
+        # not folded into the new message text.
+        assert "SENTINEL-CELL-9182" in str(exc_info.value.__cause__)
+
+    @respx.mock
+    def test_columns_probe_raises_when_the_table_is_empty(self):
+        # A dynamic-schema plugin discovers columns only by reading data; a
+        # probe that returns zero rows (and so no columns) means Drill never
+        # had anything to infer a schema from. Returning [] would read
+        # exactly like the "no columns" failure mode Step 2 rejects for HTTP
+        # plugins.
+        respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("file"),
+                query_response([], []),
+            ]
+        )
+        with pytest.raises(DrillError, match="no rows"):
+            make_client().columns("dfs.tmp", "empty.csv")
+
+    @respx.mock
+    def test_columns_probe_rejects_injection_in_schema_before_any_query_fires(self):
+        # A malicious schema must never reach the wire through the probe's
+        # `_probe_target`/mongo interpolation sites -- `fetch_plugin_type`'s
+        # own validation rejects it first, before any query (including the
+        # SCHEMATA lookup) fires.
+        route = respx.post(f"{BASE}/query.json").mock(return_value=self._schemata("file"))
+        with pytest.raises(DrillError, match="invalid identifier"):
+            make_client().columns("dfs'; DROP TABLE x --", "sales.csv")
+        assert not route.called
+
+    @respx.mock
     def test_columns_probes_a_mongo_plugin_with_double_star(self):
         route = respx.post(f"{BASE}/query.json").mock(
             side_effect=[
@@ -633,8 +685,9 @@ class TestFilePluginMetadata:
         body = route.calls[1].request.read()
         assert b"SELECT `**` FROM" in body
         assert b"LIMIT 1" in body
-        # Collections carry no dots, so the combined path is quoted
-        # segment-wise like any other dotted schema path.
+        # A dotted collection name is quoted segment-wise like any other
+        # dotted path (see `_probe_columns`'s mongo comment) -- not a special
+        # case, just the same `quote_identifier_path` treatment as a schema.
         assert b"`dfs`.`tmp`.`mycollection`" in body
 
     @respx.mock
@@ -652,14 +705,11 @@ class TestFilePluginMetadata:
         assert b"SELECT * FROM" in body
 
     @respx.mock
-    def test_columns_probe_handles_a_table_that_is_a_registered_view(self):
-        # sqlalchemy-drill's dialect special-cases a view name here because
-        # its OWN quoting scheme (dot-counting to split plugin/workspace/
-        # filename) mishandles a name that doesn't fit that shape. This
-        # module's `_probe_target` quotes every schema segment and the
-        # table/filename uniformly, with no such failure mode, so a table
-        # that happens to be a view needs no special handling: the same
-        # `SELECT * FROM ... LIMIT 1` probe answers correctly either way.
+    def test_columns_probe_quotes_a_view_name_the_same_way_as_a_file(self):
+        # This does NOT register a view via INFORMATION_SCHEMA.VIEWS -- there
+        # is no such lookup any more (see `_probe_target`'s docstring for
+        # why). It only confirms `_probe_target` produces the same quoting
+        # for a table name shaped like a view as for an ordinary file name.
         route = respx.post(f"{BASE}/query.json").mock(
             side_effect=[
                 self._schemata("file"),
@@ -743,35 +793,6 @@ class TestFilePluginMetadata:
         assert "dfs.tmp" in message
         assert "run" in message.lower() or "query" in message.lower()
         assert "LIMIT" in message
-
-    @respx.mock
-    def test_view_names_returns_the_view_names_for_a_schema(self):
-        route = respx.post(f"{BASE}/query.json").mock(
-            return_value=query_response(["TABLE_NAME"], [{"TABLE_NAME": "top_sales"}])
-        )
-        client = make_client()
-        from drill_mcp.client_rest import fetch_view_names
-
-        assert fetch_view_names(client.query, "dfs.tmp") == ["top_sales"]
-        assert b"VIEWS" in route.calls.last.request.read()
-
-    @respx.mock
-    def test_view_names_returns_empty_list_when_the_query_fails(self):
-        # Matches the dialect's tolerance (base.py:362-372): a missing VIEWS
-        # relation (e.g. an older Drill) must not break column lookup.
-        respx.post(f"{BASE}/query.json").mock(
-            return_value=httpx.Response(500, json={"errorMessage": "no such relation"})
-        )
-        from drill_mcp.client_rest import fetch_view_names
-
-        assert fetch_view_names(make_client().query, "dfs.tmp") == []
-
-    @respx.mock
-    def test_view_names_rejects_injection_in_schema_name(self):
-        from drill_mcp.client_rest import fetch_view_names
-
-        with pytest.raises(DrillError, match="invalid identifier"):
-            fetch_view_names(make_client().query, "dfs'; DROP TABLE x --")
 
     @respx.mock
     def test_unknown_plugin_type_falls_back_to_information_schema(self):

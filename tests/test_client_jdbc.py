@@ -27,6 +27,19 @@ from drill_mcp.client_rest import DrillError
 from drill_mcp.config import load_config
 
 
+class _FakeDBAPITypeObject:
+    """Mimics jaydebeapi's real `type_code`: an object with a `.values`
+    tuple of type name strings, NOT a bare string. Deliberately has no
+    `__str__`/`__repr__` override, so `str(instance)` falls back to the
+    default object repr (`<...>`) -- a regression that stringifies this
+    directly instead of reading `.values` would produce that repr as the
+    reported type, which is exactly the failure this class exists to catch.
+    """
+
+    def __init__(self, *values):
+        self.values = values
+
+
 @pytest.fixture
 def fake_jaydebeapi(monkeypatch):
     module = MagicMock()
@@ -81,11 +94,29 @@ def test_query_returns_columns_and_rows(fake_jaydebeapi):
 
 
 def test_query_populates_metadata_from_cursor_description(fake_jaydebeapi):
+    # Shaped like jaydebeapi's actual output: type_code is a
+    # DBAPITypeObject-like value with `.values`, not a bare string. A
+    # fabricated string type_code (e.g. `("id", "INTEGER")`) would pass even
+    # if the implementation just did `str(type_code)` -- this fixture would
+    # not, since `str()` on `_FakeDBAPITypeObject` yields an object repr.
     cursor = fake_jaydebeapi.connect.return_value.cursor.return_value
-    cursor.description = [("id", "INTEGER"), ("name", "VARCHAR")]
+    cursor.description = [
+        ("id", _FakeDBAPITypeObject("INTEGER")),
+        ("name", _FakeDBAPITypeObject("VARCHAR")),
+    ]
     cursor.fetchmany.return_value = [(1, "x")]
     result = make_client().query("SELECT 1", max_rows=10)
     assert result.metadata == ["INTEGER", "VARCHAR"]
+
+
+def test_query_metadata_type_code_without_values_falls_back_to_str(fake_jaydebeapi):
+    # A type_code that is already a bare string (no `.values` attribute)
+    # must still work -- some DB-API drivers use plain strings.
+    cursor = fake_jaydebeapi.connect.return_value.cursor.return_value
+    cursor.description = [("id", "INTEGER")]
+    cursor.fetchmany.return_value = [(1,)]
+    result = make_client().query("SELECT 1", max_rows=10)
+    assert result.metadata == ["INTEGER"]
 
 
 def test_query_metadata_is_none_per_column_when_type_code_is_absent(fake_jaydebeapi):
@@ -93,6 +124,18 @@ def test_query_metadata_is_none_per_column_when_type_code_is_absent(fake_jaydebe
     # this must not raise, and must not fabricate a type.
     result = make_client().query("SELECT 1", max_rows=10)
     assert result.metadata == [None, None]
+
+
+def test_query_metadata_never_leaks_an_object_repr(fake_jaydebeapi):
+    # Regression test: stringifying a DBAPITypeObject-like type_code
+    # directly (instead of reading `.values`) produces a Python object repr
+    # like "<...DBAPITypeObject object at 0x...>" -- assert that never
+    # appears in the reported metadata.
+    cursor = fake_jaydebeapi.connect.return_value.cursor.return_value
+    cursor.description = [("id", _FakeDBAPITypeObject("BIGINT"))]
+    cursor.fetchmany.return_value = [(1,)]
+    result = make_client().query("SELECT 1", max_rows=10)
+    assert all("object at 0x" not in str(m) for m in result.metadata)
 
 
 def test_query_respects_max_rows(fake_jaydebeapi):
