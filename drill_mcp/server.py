@@ -330,10 +330,10 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         config = load_config(args.config, overrides=overrides)
-    except ConfigError as exc:
+        build_server(config).run()
+    except (ConfigError, DrillError) as exc:
         print(f"drill-mcp: configuration error: {exc}", file=sys.stderr)
         return 1
-    build_server(config).run()
     return 0
 
 
