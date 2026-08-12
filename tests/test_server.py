@@ -613,15 +613,7 @@ class TestWiring:
     def test_no_registered_tool_accepts_a_credential_argument(self):
         """Credentials come from config or environment only, never a tool argument."""
         server = build_server(load_config(env={}))
-        credential_words = {
-            "user",
-            "password",
-            "username",
-            "passwd",
-            "secret",
-            "token",
-            "credential",
-        }
+        credential_words = {"user", "password", "username", "passwd", "secret", "token", "credential"}
         for tool in server._tool_manager.list_tools():
             params = set(tool.parameters.get("properties", {}))
             assert not (params & credential_words), (

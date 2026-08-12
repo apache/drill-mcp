@@ -529,9 +529,7 @@ class RestClient:
             )
         if _contains_invalid_credentials_marker(response.text):
             raise DrillError(
-                # Line exceeds 100 cols by 4; not worth reflowing a reviewed
-                # error-message string for that, hence the noqa below.
-                f"authentication failed for user {self._config.user!r} at {_safe_url(self._config.url)}"  # noqa: E501
+                f"authentication failed for user {self._config.user!r} at {_safe_url(self._config.url)}"
             )
         self._authenticated = True
 
