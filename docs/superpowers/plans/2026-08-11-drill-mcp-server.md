@@ -2826,3 +2826,105 @@ Run before declaring the plan complete:
 - [ ] `grep -ri "alter system\|create_storage\|update_storage\|delete_storage" drill_mcp/` returns nothing outside comments and the README
 - [ ] The suite passes with neither `jaydebeapi` nor `JPype1` installed
 - [ ] `build_server(load_config())` registers exactly the nine tools listed in Task 10
+
+---
+
+### Task 11: Metadata edge cases — follow the sqlalchemy-drill methodology
+
+**Files:**
+- Modify: `drill_mcp/client_rest.py` (`QueryResult`, `fetch_plugin_type`, `fetch_columns`, new `fetch_view_names`)
+- Test: `tests/test_client_rest.py` (append)
+
+**Interfaces:**
+- Consumes: everything from Tasks 5-7
+- Produces:
+  - `QueryResult` gains `metadata: list[str]` — Drill's per-column type strings
+  - `fetch_view_names(query, schema) -> list[str]`
+  - `DYNAMIC_SCHEMA_TYPES = ("file", "mongo", "splunk")`
+
+**Why:** `DESCRIBE` cannot answer for a plugin whose schema is discovered at read
+time. `sqlalchemy-drill`'s `get_columns` (`base.py:405-470`) uses `DESCRIBE` only
+in its `else` branch and probes with `SELECT ... LIMIT 1` for
+`('file', 'mongo', 'splunk')`. Follow that methodology rather than inventing one.
+
+**Privacy note that makes the probe acceptable:** the probe reads one row, but
+`describe_table` returns **only column names and types — never the sampled row**.
+The row is discarded. There is a test asserting no sampled value appears in the
+result.
+
+- [ ] **Step 1: Capture Drill's column type metadata**
+
+Drill's `/query.json` returns a `metadata` array of type strings aligned with
+`columns` (Drill >= 1.19). `drilldbapi` builds `cursor.description` from it and
+strips size info with `re.sub(r'\(.*\)', '', m)`. Add `metadata: list[str]` to
+`QueryResult`, populated from `payload.get("metadata") or []`, and set it on the
+JDBC path from `cursor.description` type names. Absent metadata is not an error —
+older Drill omits it; fall back to a `None` type per column.
+
+- [ ] **Step 2: HTTP plugins cannot enumerate columns — say so**
+
+An HTTP plugin has no column metadata until a query has actually been run against
+the endpoint. `describe_table` on one must fail with an explanatory `ToolError`,
+not an empty list that reads as "no columns":
+
+```
+Drill cannot report columns for the HTTP plugin schema '<schema>' until a query
+has been run against it. Run a query such as
+  SELECT * FROM `<schema>`.`<table>` LIMIT 10
+and read the column names from the result.
+```
+
+- [ ] **Step 3: `fetch_columns` branches on plugin TYPE**
+
+```python
+DYNAMIC_SCHEMA_TYPES = ("file", "mongo", "splunk")
+
+def fetch_columns(query, schema, table):
+    plugin = fetch_plugin_type(query, schema)
+    if plugin == "http":
+        raise DrillError(...)                      # Step 2 message
+    if plugin in DYNAMIC_SCHEMA_TYPES:
+        return _probe_columns(query, schema, table, plugin)
+    return _describe_columns(query, schema, table)
+```
+
+`_probe_columns` mirrors the dialect:
+- `mongo` -> ``SELECT `**` FROM `schema`.`table` LIMIT 1`` (collection names carry
+  no dots, so quote the whole path segment-wise)
+- a name in `fetch_view_names(query, schema)` -> ``SELECT * FROM `schema`.`table` LIMIT 1``
+- otherwise -> ``SELECT * FROM `schema`.`file.ext` LIMIT 1``, with the filename in
+  a single backtick pair
+- read `result.columns` and `result.metadata`; strip precision (`VARCHAR(10)` ->
+  `VARCHAR`) with `re.sub(r"\(.*\)", "", t)`; return `{"name", "data_type",
+  "nullable": None}` — a probe cannot determine nullability, and guessing is worse
+  than reporting unknown
+
+`fetch_view_names` issues
+``SELECT `TABLE_NAME` FROM INFORMATION_SCHEMA.`VIEWS` WHERE TABLE_SCHEMA = '<schema>'``
+and returns `[]` on error, matching the dialect's tolerance — a missing views
+table must not break column lookup.
+
+- [ ] **Step 4: `fetch_plugin_type` resolves a bare plugin name**
+
+`WHERE SCHEMA_NAME = 'dfs'` finds nothing when only `dfs.tmp` and `dfs.root`
+exist. Fetch the `SCHEMATA` rows once and resolve in Python: exact match first,
+then the first row whose name's leading dotted component matches. Do **not** use
+`LIKE '%...%'` — that would interpolate model-supplied text into a pattern where
+`%` and `_` are wildcards.
+
+- [ ] **Step 5: Tests**
+
+Cover: `metadata` captured and precision stripped; each of the three dynamic
+types emitting the right probe SQL; mongo using `` `**` ``; a view taking the view
+branch; a plain file taking the file branch; a non-dynamic type still using
+`DESCRIBE`; `http` raising with a message naming the schema and suggesting a
+query; bare `dfs` resolving via prefix; `fetch_view_names` returning `[]` when the
+query fails; **and that no sampled row value appears anywhere in `describe_table`'s
+output.** Injection tests still apply to every new interpolation site.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add drill_mcp/client_rest.py tests/test_client_rest.py
+git commit -m "feat: follow the dialect methodology for dynamic-schema plugins"
+```
