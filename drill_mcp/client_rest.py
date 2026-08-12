@@ -361,9 +361,9 @@ def _columns_from_metadata(columns: list[str], metadata: list[str | None]) -> li
     # response) drop trailing columns.
     types = list(metadata) + [None] * max(0, len(columns) - len(metadata))
     result = []
-    # types was just padded to len(columns) above, so this zip is already
-    # length-matched; strict= would be redundant with the padding it follows.
-    for name, type_str in zip(columns, types):  # noqa: B905
+    # types was padded to at least len(columns) above, so truncating a longer
+    # metadata array here is the intended behaviour, not an oversight.
+    for name, type_str in zip(columns, types, strict=False):
         data_type = _TYPE_PRECISION.sub("", type_str) if type_str else None
         result.append({"name": name, "data_type": data_type, "nullable": None})
     return result

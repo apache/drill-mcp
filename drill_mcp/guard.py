@@ -131,7 +131,7 @@ def is_show_command(sql: str) -> bool:
     """
     try:
         statements = [s for s in sqlglot.parse(sql, read=DIALECT) if s is not None]
-    except Exception:
+    except (sqlglot.errors.SqlglotError, RecursionError):
         return False
     if len(statements) != 1:
         return False
