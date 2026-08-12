@@ -56,7 +56,7 @@ def fake_jaydebeapi(monkeypatch):
 def make_client(**overrides):
     overrides.setdefault("backend", "jdbc")
     overrides.setdefault("jdbc_driver_path", "/opt/drill-jdbc-all.jar")
-    return JdbcClient(load_config(overrides=overrides))
+    return JdbcClient(load_config(overrides=overrides, env={}))
 
 
 def test_clear_error_when_extra_is_not_installed(monkeypatch):

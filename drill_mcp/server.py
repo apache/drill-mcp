@@ -39,6 +39,7 @@ from mcp.server.mcpserver import MCPServer
 from .client_rest import DrillError, RestClient
 from .config import Config, ConfigError, load_config
 from .guard import Policy, PolicyError, check, is_show_command, matches_prefix
+from .redact import redact
 
 if TYPE_CHECKING:
     # Imported only for the type checker: build_client's lazy, in-function
@@ -76,6 +77,25 @@ class DrillTools:
     def _refuse_if_hidden(self, schema: str) -> None:
         if matches_prefix(schema, self._policy.hidden_schemas):
             raise ToolError(f"schema '{schema}' is hidden by configuration")
+
+    def _profile_mentions_hidden_schema(self, profile: dict[str, Any]) -> bool:
+        """True if a profile's query text names a hidden schema.
+
+        Profiles are cluster-wide: `list_profiles`/`get_profile` surface
+        *other users'* query text, so a hidden schema name can leak out here
+        as data even though it was never queryable directly -- the one
+        enumeration path the guard and the metadata-tool filtering were
+        built to close. A case-insensitive substring match against the
+        query text is deliberately coarse (over-filtering a profile whose
+        SQL merely mentions a hidden schema's name in a string literal is an
+        acceptable false positive; missing one is a leak).
+        """
+        if not self._policy.hidden_schemas:
+            return False
+        query_text = str(profile.get("query") or "").lower()
+        if not query_text:
+            return False
+        return any(schema.lower() in query_text for schema in self._policy.hidden_schemas)
 
     def _visible(self, schema: str | None) -> bool:
         # Fail closed, not open: an item this function cannot identify (no
@@ -200,18 +220,27 @@ class DrillTools:
         if not isinstance(limit, int) or isinstance(limit, bool):
             raise ToolError("limit must be an integer")
         try:
-            return self._require_management("profiles")(limit=limit)
+            profiles = self._require_management("profiles")(limit=limit)
         except DrillError as exc:
             raise ToolError(str(exc)) from exc
+        profiles = redact(profiles)
+        return [
+            p
+            for p in profiles
+            if isinstance(p, dict) and not self._profile_mentions_hidden_schema(p)
+        ]
 
     def get_profile(self, query_id: str) -> dict[str, Any]:
         """Fetch the full profile for one query id."""
         if not isinstance(query_id, str):
             raise ToolError("query_id must be a string")
         try:
-            return self._require_management("profile")(query_id)
+            profile = self._require_management("profile")(query_id)
         except DrillError as exc:
             raise ToolError(str(exc)) from exc
+        if isinstance(profile, dict) and self._profile_mentions_hidden_schema(profile):
+            raise ToolError(f"profile {query_id!r} references a hidden schema")
+        return redact(profile)
 
     def cancel_query(self, query_id: str) -> str:
         """Cancel a running query by its query id."""
@@ -301,10 +330,10 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         config = load_config(args.config, overrides=overrides)
-    except ConfigError as exc:
+        build_server(config).run()
+    except (ConfigError, DrillError) as exc:
         print(f"drill-mcp: configuration error: {exc}", file=sys.stderr)
         return 1
-    build_server(config).run()
     return 0
 
 

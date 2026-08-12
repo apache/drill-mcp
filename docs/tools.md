@@ -397,7 +397,12 @@ client surfaces defaults, since a caller passing no `limit` at all still
 gets at most 20 profiles back, not an unbounded list.
 
 **Returns** a list of profile summary dicts, shape defined by Drill's
-`/profiles.json`:
+`/profiles.json`, passed through the same secret redaction as
+`list_storage_plugins` (profiles are cluster-wide and can carry other
+users' connection strings). Any entry whose query text names a
+`hidden_schemas` entry is dropped entirely, the same protection
+`list_schemas`/`list_tables` apply — otherwise a hidden schema's name would
+leak out as data in another user's query text:
 
 ```json
 [
@@ -431,9 +436,12 @@ Fetches the full profile for one query id.
 |---|---|---|---|
 | `query_id` | string | no | Drill's query UUID, as returned in `run_query`'s `query_id` field (REST backend only — always `null` on JDBC). Validated against `[A-Za-z0-9-]+`. |
 
-**Returns** Drill's full profile JSON for that query, unmodified — the
-complete `/profiles/<query_id>.json` payload (fragments, operator metrics,
-timing, etc.), which can be large.
+**Returns** Drill's full profile JSON for that query — the complete
+`/profiles/<query_id>.json` payload (fragments, operator metrics, timing,
+etc.), which can be large — passed through the same secret redaction as
+`list_storage_plugins`. A full profile embeds Drill's serialized physical
+plan, which for JDBC and HTTP storage plugins can carry plugin
+configuration, so this is not returned unmodified.
 
 **Errors**
 
@@ -442,6 +450,8 @@ timing, etc.), which can be large.
 - `query_id must be a string` — wrong type.
 - `invalid query id: '<x>'` — `query_id` contains characters outside
   `[A-Za-z0-9-]`. Rejected before any request is made.
+- `profile '<id>' references a hidden schema` — the profile's query text
+  names a `hidden_schemas` entry.
 - Drill's own error text otherwise (e.g. no profile with that id).
 
 ---

@@ -39,7 +39,7 @@ BASE = "http://drill:8047"
 
 def make_client(**overrides):
     overrides.setdefault("url", BASE)
-    return RestClient(load_config(overrides=overrides))
+    return RestClient(load_config(overrides=overrides, env={}))
 
 
 class TestQuoting:
@@ -135,6 +135,24 @@ class TestQuery:
         assert make_client().query("SELECT 1", max_rows=2).truncated is True
 
     @respx.mock
+    def test_slices_rows_to_max_rows_even_if_drill_ignores_autolimit(self):
+        # `autoLimit` asks Drill to cap rows server-side, but the cap must
+        # not depend entirely on Drill honoring that field. Simulate Drill
+        # returning more rows than requested (e.g. an older Drill version, or
+        # autoLimit simply not being respected) and confirm the client still
+        # enforces the cap itself -- exactly like JdbcClient.query's
+        # fetchmany(max_rows).
+        respx.post(f"{BASE}/query.json").mock(
+            return_value=httpx.Response(
+                200,
+                json={"columns": ["a"], "rows": [{"a": str(i)} for i in range(10)]},
+            )
+        )
+        result = make_client().query("SELECT 1", max_rows=2)
+        assert len(result.rows) == 2
+        assert result.truncated is True
+
+    @respx.mock
     def test_not_truncated_when_max_rows_is_zero(self):
         # 0 >= 0 would be a false "truncated" without the max_rows > 0 guard.
         respx.post(f"{BASE}/query.json").mock(
@@ -171,6 +189,27 @@ class TestQuery:
             make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
         assert BASE in str(exc.value)
         assert "s3cret" not in str(exc.value)
+
+    @respx.mock
+    def test_connection_failure_message_drops_a_password_embedded_in_the_url(self):
+        # Mirrors client_jdbc.py's
+        # test_jdbc_url_drops_userinfo_from_a_url_that_embeds_credentials --
+        # the REST backend must apply the same defense. config.url is
+        # free-form and unvalidated, so nothing stops
+        # DRILL_URL=http://alice:s3cret@drill:8047; every message that
+        # echoes config.url back to the model must not leak the password
+        # embedded there.
+        url = "http://alice:s3cret@drill:8047"
+        respx.post(f"{url}/j_security_check").mock(side_effect=httpx.ConnectError("refused"))
+        respx.post(f"{url}/query.json").mock(side_effect=httpx.ConnectError("refused"))
+        with pytest.raises(DrillError) as exc:
+            make_client(url=url, auth="basic", user="alice", password="s3cret").query(
+                "SELECT 1", max_rows=1
+            )
+        message = str(exc.value)
+        assert "s3cret" not in message
+        assert "alice" not in message
+        assert "drill:8047" in message
 
     @respx.mock
     def test_timeout_is_reported_clearly(self):
