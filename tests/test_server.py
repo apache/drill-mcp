@@ -535,3 +535,77 @@ class TestShowFiltering:
         result = make_tools(client, hidden_schemas=["sys"]).run_query(sql)
         assert {"SCHEMA_NAME": "sys"} not in result["rows"]
         assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
+
+
+from drill_mcp.client_jdbc import JdbcClient
+from drill_mcp.client_rest import RestClient
+from drill_mcp.server import build_client, build_server
+
+
+class TestWiring:
+    def test_rest_backend_builds_a_rest_client(self):
+        assert isinstance(build_client(load_config()), RestClient)
+
+    def test_jdbc_backend_builds_a_jdbc_client(self):
+        cfg = load_config(overrides={"backend": "jdbc", "jdbc_driver_path": "/x.jar"})
+        assert isinstance(build_client(cfg), JdbcClient)
+
+    def test_all_tools_are_registered(self):
+        server = build_server(load_config())
+        names = {tool.name for tool in server._tool_manager.list_tools()}
+        assert names == {
+            "run_query",
+            "list_schemas",
+            "list_tables",
+            "describe_table",
+            "list_storage_plugins",
+            "cluster_status",
+            "list_profiles",
+            "get_profile",
+            "cancel_query",
+        }
+
+    def test_every_tool_has_a_description(self):
+        server = build_server(load_config())
+        assert all(tool.description for tool in server._tool_manager.list_tools())
+
+    def test_no_write_or_mutation_tools_are_registered(self):
+        server = build_server(load_config())
+        names = {tool.name for tool in server._tool_manager.list_tools()}
+        forbidden = {"create_storage_plugin", "update_storage_plugin",
+                     "delete_storage_plugin", "set_option", "alter_system"}
+        assert not (names & forbidden)
+
+    def test_no_registered_tool_accepts_a_credential_argument(self):
+        """Credentials come from config or environment only, never a tool argument."""
+        server = build_server(load_config())
+        credential_words = {"user", "password", "username", "passwd", "secret", "token", "credential"}
+        for tool in server._tool_manager.list_tools():
+            params = set(tool.parameters.get("properties", {}))
+            assert not (params & credential_words), f"{tool.name} accepts {params & credential_words}"
+
+
+class TestMain:
+    def test_config_error_exits_nonzero_with_a_message(self, capsys):
+        from drill_mcp.server import main
+
+        assert main(["--config", "/nonexistent.yaml"]) == 1
+        assert "not found" in capsys.readouterr().err
+
+    def test_cli_flags_reach_the_config(self, monkeypatch):
+        from drill_mcp import server as server_module
+
+        # Note: `captured.setdefault("cfg", cfg) or MagicMock()` (as drafted
+        # in the task brief) returns the truthy `cfg` itself rather than the
+        # MagicMock, so `build_server(cfg).run()` would blow up calling
+        # `.run()` on a `Config`. Using a real fake avoids that trap.
+        captured = {}
+
+        def fake_build_server(cfg):
+            captured["cfg"] = cfg
+            return MagicMock()
+
+        monkeypatch.setattr(server_module, "build_server", fake_build_server)
+        server_module.main(["--url", "http://cli:8047", "--max-rows", "7"])
+        assert captured["cfg"].url == "http://cli:8047"
+        assert captured["cfg"].max_rows == 7

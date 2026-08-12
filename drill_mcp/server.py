@@ -21,15 +21,23 @@
 
 Tool bodies live on `DrillTools` as plain methods so they can be unit-tested
 without standing up an MCP session; `build_server` (Task 9/10) registers the
-bound methods with FastMCP.
+bound methods with the MCP server (`mcp.server.mcpserver.MCPServer` -- this
+package's `mcp` dependency renamed `FastMCP` to `MCPServer` as of mcp 2.0.0;
+the internal shape used here, `add_tool`/`_tool_manager.list_tools`/`run`,
+is unchanged).
 """
 
 from __future__ import annotations
 
+import argparse
+import logging
+import sys
 from typing import Any
 
-from .client_rest import DrillError
-from .config import Config
+from mcp.server.mcpserver import MCPServer
+
+from .client_rest import DrillError, RestClient
+from .config import Config, ConfigError, load_config
 from .guard import Policy, PolicyError, check, is_show_command, matches_prefix
 
 
@@ -207,3 +215,91 @@ class DrillTools:
             return self._require_management("cancel_query")(query_id)
         except DrillError as exc:
             raise ToolError(str(exc)) from exc
+
+
+def build_client(config: Config) -> Any:
+    """Construct the wire client the configured backend calls for."""
+    if config.backend == "jdbc":
+        from .client_jdbc import JdbcClient
+
+        return JdbcClient(config)
+    return RestClient(config)
+
+
+def build_server(config: Config) -> MCPServer:
+    """Build an MCP server with every read/metadata tool registered.
+
+    No write- or mutation-capable tool is ever registered here: storage
+    plugin create/update/delete and `ALTER SYSTEM` have no implementation
+    anywhere in this package, so there is nothing such a tool could call.
+    """
+    client = build_client(config)
+    tools = DrillTools(config, client)
+    server = MCPServer("drill")
+    for method in (
+        tools.run_query,
+        tools.list_schemas,
+        tools.list_tables,
+        tools.describe_table,
+        tools.list_storage_plugins,
+        tools.cluster_status,
+        tools.list_profiles,
+        tools.get_profile,
+        tools.cancel_query,
+    ):
+        server.add_tool(method, name=method.__name__, description=method.__doc__)
+    return server
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="drill-mcp", description="MCP server for Apache Drill")
+    parser.add_argument("--config", help="path to a YAML config file")
+    parser.add_argument("--url", help="Drill HTTP endpoint, e.g. http://localhost:8047")
+    parser.add_argument("--backend", choices=["rest", "jdbc"])
+    parser.add_argument("--auth", choices=["none", "basic", "kerberos"])
+    parser.add_argument("--max-rows", type=int, dest="max_rows")
+    parser.add_argument(
+        "--writable-plugin",
+        action="append",
+        dest="writable_plugins",
+        metavar="PLUGIN",
+        help="permit data writes into this plugin; repeatable, empty by default",
+    )
+    parser.add_argument(
+        "--hidden-schema",
+        action="append",
+        dest="hidden_schemas",
+        metavar="SCHEMA",
+        help="hide this schema from listings and queries; repeatable",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    # sqlglot logs a WARNING-level "Falling back to parsing as a 'Command'"
+    # message for every SHOW/EXPLAIN/ALTER statement the guard parses (twice
+    # for SHOW, since the guard parses it twice). Python's logging module
+    # writes unconfigured loggers to stderr, never stdout, so this cannot
+    # corrupt the JSON-RPC session on stdio -- it is only quieted here so
+    # operators are not spammed. Configured here, not at import time: a
+    # library that reconfigures logging as a side effect of being imported
+    # is bad manners.
+    logging.getLogger("sqlglot").setLevel(logging.ERROR)
+
+    args = _parse_args(argv)
+    overrides = {
+        key: value
+        for key, value in vars(args).items()
+        if key != "config" and value is not None
+    }
+    try:
+        config = load_config(args.config, overrides=overrides)
+    except ConfigError as exc:
+        print(f"drill-mcp: configuration error: {exc}", file=sys.stderr)
+        return 1
+    build_server(config).run()
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
