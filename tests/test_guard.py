@@ -24,7 +24,7 @@ import sqlglot
 from sqlglot import exp
 
 import drill_mcp.guard as guard_module
-from drill_mcp.guard import Policy, PolicyError, check, matches_prefix
+from drill_mcp.guard import Policy, PolicyError, check, is_show_schemas, matches_prefix
 
 
 class TestSqlglotAssumptions:
@@ -326,6 +326,48 @@ class TestDrillDialectRegressions:
         hidden = Policy(hidden_schemas=("sys",))
         with pytest.raises(PolicyError, match="hidden"):
             check("SELECT * FROM `sys`.options", hidden)
+
+
+class TestIsShowSchemas:
+    """Detection is parser-based, not a regex over the raw SQL string, so a
+    leading comment (which the tokenizer strips) cannot defeat it.
+    """
+
+    def test_show_schemas_matches(self):
+        assert is_show_schemas("SHOW SCHEMAS") is True
+
+    def test_show_databases_matches(self):
+        assert is_show_schemas("SHOW DATABASES") is True
+
+    def test_lowercase_matches(self):
+        assert is_show_schemas("show schemas") is True
+
+    def test_mixed_case_matches(self):
+        assert is_show_schemas("ShOw DaTaBaSeS") is True
+
+    def test_leading_block_comment_still_matches(self):
+        assert is_show_schemas("/* x */ SHOW SCHEMAS") is True
+
+    def test_leading_line_comment_still_matches(self):
+        assert is_show_schemas("-- comment\nSHOW DATABASES") is True
+
+    def test_show_tables_does_not_match(self):
+        assert is_show_schemas("SHOW TABLES") is False
+
+    def test_show_files_does_not_match(self):
+        assert is_show_schemas("SHOW FILES IN dfs.tmp") is False
+
+    def test_ordinary_select_does_not_match(self):
+        assert is_show_schemas("SELECT * FROM dfs.tmp.notes") is False
+
+    def test_select_mentioning_show_as_a_string_does_not_match(self):
+        assert is_show_schemas("SELECT 'SHOW SCHEMAS' AS x") is False
+
+    def test_unparseable_sql_returns_false_rather_than_raising(self):
+        assert is_show_schemas("((((((") is False
+
+    def test_empty_sql_returns_false(self):
+        assert is_show_schemas("") is False
 
 
 class TestCoverageGaps:

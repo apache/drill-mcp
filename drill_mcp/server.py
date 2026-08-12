@@ -30,11 +30,17 @@ from typing import Any
 
 from .client_rest import DrillError
 from .config import Config
-from .guard import Policy, PolicyError, check, matches_prefix
+from .guard import Policy, PolicyError, check, is_show_schemas, matches_prefix
 
 
 class ToolError(Exception):
     """The single error type surfaced to MCP clients. Never carries a traceback."""
+
+
+def _first_value(row: dict[str, Any]) -> str | None:
+    for value in row.values():
+        return str(value) if value is not None else None
+    return None
 
 
 class DrillTools:
@@ -86,9 +92,16 @@ class DrillTools:
         except DrillError as exc:
             raise ToolError(str(exc)) from exc
 
+        # `SHOW SCHEMAS` / `SHOW DATABASES` are evaluated server-side by
+        # Drill, so the guard cannot filter them by rewriting or rejecting
+        # the query; their rows are filtered here on the way back instead.
+        rows = result.rows
+        if self._policy.hidden_schemas and is_show_schemas(sql):
+            rows = [row for row in rows if self._visible(_first_value(row))]
+
         payload: dict[str, Any] = {
             "columns": result.columns,
-            "rows": result.rows,
+            "rows": rows,
             "query_id": result.query_id,
             "truncated": result.truncated,
         }
@@ -120,5 +133,58 @@ class DrillTools:
         self._refuse_if_hidden(schema)
         try:
             return self._client.columns(schema, table)
+        except DrillError as exc:
+            raise ToolError(str(exc)) from exc
+
+    # -- management tools ---------------------------------------------------
+
+    def _require_management(self, name: str) -> Any:
+        method = getattr(self._client, name, None)
+        if method is None:
+            raise ToolError(
+                f"'{name}' needs a REST connection to Drill; the JDBC backend "
+                "does not expose management endpoints"
+            )
+        return method
+
+    def list_storage_plugins(self) -> list[dict[str, Any]]:
+        """List storage plugin configurations, with all secrets redacted."""
+        try:
+            plugins = self._require_management("storage_plugins")()
+        except DrillError as exc:
+            raise ToolError(str(exc)) from exc
+        return [p for p in plugins if self._visible(p.get("name"))]
+
+    def cluster_status(self) -> dict[str, Any]:
+        """Report Drillbit membership and overall cluster status."""
+        try:
+            return self._require_management("cluster_status")()
+        except DrillError as exc:
+            raise ToolError(str(exc)) from exc
+
+    def list_profiles(self, limit: int = 20) -> list[dict[str, Any]]:
+        """List recent and running query profiles, newest first."""
+        if not isinstance(limit, int) or isinstance(limit, bool):
+            raise ToolError("limit must be an integer")
+        try:
+            return self._require_management("profiles")(limit=limit)
+        except DrillError as exc:
+            raise ToolError(str(exc)) from exc
+
+    def get_profile(self, query_id: str) -> dict[str, Any]:
+        """Fetch the full profile for one query id."""
+        if not isinstance(query_id, str):
+            raise ToolError("query_id must be a string")
+        try:
+            return self._require_management("profile")(query_id)
+        except DrillError as exc:
+            raise ToolError(str(exc)) from exc
+
+    def cancel_query(self, query_id: str) -> str:
+        """Cancel a running query by its query id."""
+        if not isinstance(query_id, str):
+            raise ToolError("query_id must be a string")
+        try:
+            return self._require_management("cancel_query")(query_id)
         except DrillError as exc:
             raise ToolError(str(exc)) from exc

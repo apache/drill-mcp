@@ -184,3 +184,162 @@ class TestDescribeTable:
         client.columns.side_effect = DrillError("invalid identifier")
         with pytest.raises(ToolError, match="invalid identifier"):
             make_tools(client).describe_table("dfs.tmp", "nope")
+
+
+class TestManagementTools:
+    def test_list_storage_plugins_passes_through_redacted_output(self):
+        client = MagicMock()
+        client.storage_plugins.return_value = [
+            {"name": "s3", "config": {"secret": "***REDACTED***"}}
+        ]
+        assert make_tools(client).list_storage_plugins()[0]["name"] == "s3"
+
+    def test_list_storage_plugins_hides_plugins_backing_hidden_schemas(self):
+        client = MagicMock()
+        client.storage_plugins.return_value = [{"name": "sys"}, {"name": "dfs"}]
+        result = make_tools(client, hidden_schemas=["sys"]).list_storage_plugins()
+        assert [p["name"] for p in result] == ["dfs"]
+
+    def test_cluster_status(self):
+        client = MagicMock()
+        client.cluster_status.return_value = {"status": "Running!"}
+        assert make_tools(client).cluster_status()["status"] == "Running!"
+
+    def test_list_profiles_uses_the_default_limit(self):
+        client = MagicMock()
+        client.profiles.return_value = []
+        make_tools(client).list_profiles()
+        assert client.profiles.call_args.kwargs["limit"] == 20
+
+    def test_list_profiles_honours_an_explicit_limit(self):
+        client = MagicMock()
+        client.profiles.return_value = []
+        make_tools(client).list_profiles(limit=5)
+        assert client.profiles.call_args.kwargs["limit"] == 5
+
+    def test_get_profile(self):
+        client = MagicMock()
+        client.profile.return_value = {"queryId": "abc"}
+        assert make_tools(client).get_profile("abc")["queryId"] == "abc"
+
+    def test_cancel_query(self):
+        client = MagicMock()
+        client.cancel_query.return_value = "Cancelled"
+        assert make_tools(client).cancel_query("abc") == "Cancelled"
+
+    def test_management_tools_are_unavailable_on_a_client_without_them(self):
+        client = MagicMock(spec=["query", "schemas", "tables", "columns"])
+        with pytest.raises(ToolError, match="REST"):
+            make_tools(client).cluster_status()
+
+    def test_drill_errors_become_tool_errors(self):
+        client = MagicMock()
+        client.profile.side_effect = DrillError("no such query")
+        with pytest.raises(ToolError, match="no such query"):
+            make_tools(client).get_profile("abc")
+
+    def test_get_profile_rejects_non_string_query_id(self):
+        client = MagicMock()
+        with pytest.raises(ToolError):
+            make_tools(client).get_profile(123)
+
+    def test_cancel_query_rejects_non_string_query_id(self):
+        client = MagicMock()
+        with pytest.raises(ToolError):
+            make_tools(client).cancel_query(123)
+
+    def test_list_profiles_rejects_non_integer_limit(self):
+        client = MagicMock()
+        with pytest.raises(ToolError):
+            make_tools(client).list_profiles(limit="20")
+
+
+class TestShowFiltering:
+    """SHOW is evaluated server-side by Drill, so rows are filtered on return."""
+
+    def test_show_schemas_rows_are_filtered(self):
+        client = MagicMock()
+        client.query.return_value = QueryResult(
+            ["SCHEMA_NAME"],
+            [{"SCHEMA_NAME": "sys"}, {"SCHEMA_NAME": "dfs.tmp"}],
+        )
+        result = make_tools(client, hidden_schemas=["sys"]).run_query("SHOW SCHEMAS")
+        assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
+
+    def test_show_databases_rows_are_filtered(self):
+        client = MagicMock()
+        client.query.return_value = QueryResult(
+            ["SCHEMA_NAME"],
+            [{"SCHEMA_NAME": "INFORMATION_SCHEMA"}, {"SCHEMA_NAME": "dfs"}],
+        )
+        result = make_tools(client, hidden_schemas=["INFORMATION_SCHEMA"]).run_query(
+            "SHOW DATABASES"
+        )
+        assert result["rows"] == [{"SCHEMA_NAME": "dfs"}]
+
+    def test_ordinary_select_rows_are_not_filtered(self):
+        client = MagicMock()
+        client.query.return_value = QueryResult(
+            ["SCHEMA_NAME"], [{"SCHEMA_NAME": "sys"}]
+        )
+        result = make_tools(client, hidden_schemas=["sys"]).run_query(
+            "SELECT SCHEMA_NAME FROM dfs.tmp.notes"
+        )
+        assert result["rows"] == [{"SCHEMA_NAME": "sys"}]
+
+    def test_show_filtering_is_a_no_op_without_hidden_schemas(self):
+        client = MagicMock()
+        client.query.return_value = QueryResult(["SCHEMA_NAME"], [{"SCHEMA_NAME": "sys"}])
+        result = make_tools(client).run_query("SHOW SCHEMAS")
+        assert result["rows"] == [{"SCHEMA_NAME": "sys"}]
+
+    def test_show_schemas_with_leading_block_comment_is_still_filtered(self):
+        """Regression test for the raw-regex bypass: a leading comment defeats
+        a `^\\s*SHOW` anchor but not the parser, since the tokenizer strips
+        comments before the guard or this filter ever sees the text."""
+        client = MagicMock()
+        client.query.return_value = QueryResult(
+            ["SCHEMA_NAME"],
+            [{"SCHEMA_NAME": "sys"}, {"SCHEMA_NAME": "dfs.tmp"}],
+        )
+        result = make_tools(client, hidden_schemas=["sys"]).run_query(
+            "/* x */ SHOW SCHEMAS"
+        )
+        assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
+
+    def test_show_databases_with_leading_line_comment_is_still_filtered(self):
+        client = MagicMock()
+        client.query.return_value = QueryResult(
+            ["SCHEMA_NAME"],
+            [{"SCHEMA_NAME": "INFORMATION_SCHEMA"}, {"SCHEMA_NAME": "dfs"}],
+        )
+        result = make_tools(client, hidden_schemas=["INFORMATION_SCHEMA"]).run_query(
+            "-- comment\nSHOW DATABASES"
+        )
+        assert result["rows"] == [{"SCHEMA_NAME": "dfs"}]
+
+    def test_show_filtering_is_case_insensitive(self):
+        client = MagicMock()
+        client.query.return_value = QueryResult(
+            ["SCHEMA_NAME"],
+            [{"SCHEMA_NAME": "sys"}, {"SCHEMA_NAME": "dfs.tmp"}],
+        )
+        result = make_tools(client, hidden_schemas=["sys"]).run_query("show schemas")
+        assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
+
+        client.query.return_value = QueryResult(
+            ["SCHEMA_NAME"],
+            [{"SCHEMA_NAME": "sys"}, {"SCHEMA_NAME": "dfs.tmp"}],
+        )
+        result = make_tools(client, hidden_schemas=["sys"]).run_query("ShOw ScHeMaS")
+        assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
+
+    def test_show_tables_rows_are_not_filtered(self):
+        """SHOW TABLES rows are table names, not schema names; filtering them
+        against hidden_schemas would be wrong."""
+        client = MagicMock()
+        client.query.return_value = QueryResult(
+            ["TABLE_NAME"], [{"TABLE_NAME": "sys"}]
+        )
+        result = make_tools(client, hidden_schemas=["sys"]).run_query("SHOW TABLES")
+        assert result["rows"] == [{"TABLE_NAME": "sys"}]

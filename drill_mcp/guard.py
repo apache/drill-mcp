@@ -90,6 +90,37 @@ def matches_prefix(qualified: str, entries: Iterable[str]) -> bool:
     return False
 
 
+def is_show_schemas(sql: str) -> bool:
+    """True if `sql` is `SHOW SCHEMAS` or `SHOW DATABASES`.
+
+    Detected from the parsed statement, not a regex over the raw text: a
+    leading comment (`/* x */ SHOW SCHEMAS`) defeats a `^\\s*SHOW` anchor
+    because comments are only stripped by the tokenizer, not by string
+    matching. Drill's grammar for both spellings falls back to sqlglot's
+    generic `Command`, with the target left as a `Literal` in `expression`
+    (e.g. `Command(this='SHOW', expression=Literal(this='SCHEMAS'))`).
+
+    Returns False rather than raising if `sql` does not parse: by the time
+    this is called, `check()` has already accepted the statement, so a
+    parse failure here would be a bug in this function, not a policy
+    decision to surface.
+    """
+    try:
+        statements = [s for s in sqlglot.parse(sql, read=DIALECT) if s is not None]
+    except Exception:
+        return False
+    if len(statements) != 1:
+        return False
+    statement = statements[0]
+    if not isinstance(statement, exp.Command):
+        return False
+    if str(statement.this or "").upper() != "SHOW":
+        return False
+    expression = statement.args.get("expression")
+    target = expression.this if isinstance(expression, exp.Literal) else str(expression or "")
+    return str(target or "").strip().upper() in {"SCHEMAS", "DATABASES"}
+
+
 def check(sql: str, policy: Policy) -> None:
     """Return None if `sql` is permitted under `policy`; raise PolicyError otherwise."""
     _check(sql, policy, depth=0)
