@@ -619,29 +619,30 @@ class TestFilePluginMetadata:
         assert "078-05-1120-SENTINEL" not in repr(result)
 
     @respx.mock
-    def test_columns_probe_failure_does_not_leak_drills_error_text(self):
-        # A probe reads a row -- if Drill fails WHILE reading it (a
-        # type-coercion or malformed-record error), Drill's own error text
-        # can embed the offending cell's content. DESCRIBE could never
-        # trigger this; only the probe can, so the probe's failure path must
-        # not surface Drill's raw error message.
+    def test_columns_probe_failure_surfaces_drills_error_text_unchanged(self):
+        # Drill's own error text is what a caller needs to tell a missing
+        # table, a permissions failure, and a genuine data error apart, and
+        # to correct the request -- so the probe path propagates it exactly
+        # like `_describe_columns` and `fetch_plugin_type` already do. (An
+        # earlier version of this code suppressed it here on the theory that
+        # Drill's error text could embed sampled cell content; the Drill
+        # maintainer confirmed that premise was wrong, so this test protects
+        # the opposite property.)
         respx.post(f"{BASE}/query.json").mock(
             side_effect=[
                 self._schemata("file"),
                 httpx.Response(
-                    500, json={"errorMessage": "conversion failed on value SENTINEL-CELL-9182"}
+                    500,
+                    json={
+                        "errorMessage": "VALIDATION ERROR: Object 'sales.csv' not found within 'dfs.tmp'"
+                    },
                 ),
             ]
         )
-        with pytest.raises(DrillError) as exc_info:
+        with pytest.raises(
+            DrillError, match=r"Object 'sales\.csv' not found within 'dfs\.tmp'"
+        ):
             make_client().columns("dfs.tmp", "sales.csv")
-        message = str(exc_info.value)
-        assert "SENTINEL-CELL-9182" not in message
-        assert "dfs.tmp" in message
-        assert "sales.csv" in message
-        # The original Drill error is preserved as the exception chain, just
-        # not folded into the new message text.
-        assert "SENTINEL-CELL-9182" in str(exc_info.value.__cause__)
 
     @respx.mock
     def test_columns_probe_raises_when_the_table_is_empty(self):

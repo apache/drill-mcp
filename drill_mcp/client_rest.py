@@ -370,14 +370,13 @@ def _probe_columns(query: Query, schema: str, table: str, plugin_type: str) -> l
     caller (`describe_table`) gets column names and types, never sampled
     values.
 
-    That same privacy property is why a probe FAILURE is handled specially
-    below, not just left to propagate: Drill's own error text for a query
-    that fails while reading a row (a type-coercion or malformed-record
-    error, for instance) can embed the offending cell's content --
-    `_error_text` passes `errorMessage` through verbatim, and `server.py`
-    surfaces `DrillError`'s text to the caller unchanged. `DESCRIBE` could
-    never trigger this path; only the probe can, so only the probe needs to
-    guard against it.
+    A probe FAILURE is left to propagate unchanged, exactly like
+    `_describe_columns` and `fetch_plugin_type`: Drill's error text (a
+    missing table, a permissions failure, a genuine data error) is what a
+    caller needs to tell those apart and correct the request. Confirmed with
+    the Drill maintainer that Drill's own errors do not embed cell content,
+    so there is nothing here for a probe-specific failure path to guard
+    against.
     """
     if plugin_type == "mongo":
         # MongoDB collection names CAN contain dots (e.g. "logs.2024"); this
@@ -393,15 +392,7 @@ def _probe_columns(query: Query, schema: str, table: str, plugin_type: str) -> l
         target = _probe_target(schema, table)
         sql = f"SELECT * FROM {target} LIMIT 1"
 
-    try:
-        result = query(sql, 1)
-    except DrillError as exc:
-        # Deliberately does NOT include `exc`'s text in the new message --
-        # only chains it as the cause -- because that text may be Drill's
-        # own error message, which can embed sampled cell content.
-        raise DrillError(
-            f"could not determine columns for `{schema}`.`{table}`: the probe query failed"
-        ) from exc
+    result = query(sql, 1)
 
     if not result.columns:
         # A dynamic-schema plugin discovers columns only by reading data;
