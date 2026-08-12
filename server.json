@@ -1,0 +1,64 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.apache/drill-mcp",
+  "title": "Apache Drill",
+  "description": "Query Apache Drill and explore its schemas, tables, columns, storage plugins, and cluster state. Writes are denied unless explicitly allowlisted.",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/apache/drill-mcp",
+    "source": "github",
+    "id": "R_kgDOT2iZ_g"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "drill-mcp",
+      "version": "0.1.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "DRILL_URL",
+          "description": "Drillbit HTTP endpoint, e.g. http://localhost:8047",
+          "default": "http://localhost:8047"
+        },
+        {
+          "name": "DRILL_BACKEND",
+          "description": "Backend to talk to Drill with: rest (default) or jdbc. The jdbc backend requires the drill-mcp[jdbc] extra and a JVM.",
+          "default": "rest"
+        },
+        {
+          "name": "DRILL_AUTH",
+          "description": "Authentication mode: none (default), basic (Drill's HTTP form login), or kerberos (SPNEGO, requires the drill-mcp[kerberos] extra).",
+          "default": "none"
+        },
+        {
+          "name": "DRILL_USER",
+          "description": "Username, required when DRILL_AUTH is basic."
+        },
+        {
+          "name": "DRILL_PASSWORD",
+          "description": "Password, required when DRILL_AUTH is basic.",
+          "isSecret": true
+        },
+        {
+          "name": "DRILL_MAX_ROWS",
+          "description": "Maximum rows returned by a single query. A caller may request fewer but never more.",
+          "default": "1000"
+        },
+        {
+          "name": "DRILL_TIMEOUT_SECONDS",
+          "description": "Per-request timeout in seconds.",
+          "default": "60"
+        },
+        {
+          "name": "DRILL_JDBC_DRIVER_PATH",
+          "description": "Path to drill-jdbc-all.jar. Required when DRILL_BACKEND is jdbc."
+        }
+      ]
+    }
+  ]
+}
