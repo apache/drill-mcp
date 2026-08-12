@@ -37,21 +37,38 @@ from dataclasses import dataclass
 import sqlglot
 from sqlglot import exp
 
-DIALECT = "drill"  # sqlglot ships a native Drill dialect (sqlglot.dialects.drill.Drill).
+DIALECT = (
+    "drill"  # sqlglot ships a native Drill dialect (sqlglot.dialects.drill.Drill).
+)
 
 # Commands sqlglot does not model as expressions, but which cannot write.
 # EXPLAIN is handled separately (see _check_write): it is not blanket-safe
 # because its body can itself be a write.
 _SAFE_COMMANDS = {"SHOW", "DESCRIBE", "DESC"}
 
-_READ_TYPES = (exp.Select, exp.Union, exp.Intersect, exp.Except, exp.Subquery, exp.Describe)
+_READ_TYPES = (
+    exp.Select,
+    exp.Union,
+    exp.Intersect,
+    exp.Except,
+    exp.Subquery,
+    exp.Describe,
+)
 
 # Node types that indicate a write is embedded somewhere inside a statement
 # whose root node is a read type (e.g. `WITH x AS (INSERT ...) SELECT * FROM x`,
 # or `SELECT ... INTO ...`). Checking only the root type is not enough: the
 # safety property must not depend on sqlglot's Drill grammar rejecting these
 # forms outright — a write hidden deeper in the tree must still be caught.
-_EMBEDDED_WRITE_TYPES = (exp.Insert, exp.Update, exp.Delete, exp.Merge, exp.Create, exp.Drop, exp.Into)
+_EMBEDDED_WRITE_TYPES = (
+    exp.Insert,
+    exp.Update,
+    exp.Delete,
+    exp.Merge,
+    exp.Create,
+    exp.Drop,
+    exp.Into,
+)
 
 # EXPLAIN unwraps its body and re-checks it recursively; this bounds
 # `EXPLAIN EXPLAIN EXPLAIN ...` so a malicious input cannot blow the stack.
@@ -68,7 +85,7 @@ class Policy:
     hidden_schemas: tuple[str, ...] = ()
 
     @classmethod
-    def from_config(cls, cfg) -> "Policy":
+    def from_config(cls, cfg) -> Policy:
         return cls(
             writable_plugins=tuple(cfg.writable_plugins),
             hidden_schemas=tuple(cfg.hidden_schemas),
@@ -123,12 +140,15 @@ def is_show_command(sql: str) -> bool:
     """
     try:
         statements = [s for s in sqlglot.parse(sql, read=DIALECT) if s is not None]
-    except Exception:
+    except (sqlglot.errors.SqlglotError, RecursionError):
         return False
     if len(statements) != 1:
         return False
     statement = statements[0]
-    return isinstance(statement, exp.Command) and str(statement.this or "").upper() == "SHOW"
+    return (
+        isinstance(statement, exp.Command)
+        and str(statement.this or "").upper() == "SHOW"
+    )
 
 
 def check(sql: str, policy: Policy) -> None:
@@ -189,10 +209,14 @@ def _check_write(statement: exp.Expression, policy: Policy, depth: int) -> None:
     if isinstance(statement, (exp.Create, exp.Drop)):
         kind = (statement.args.get("kind") or "").upper()
         if kind not in {"TABLE", "VIEW"}:
-            raise PolicyError(f"{statement.key.upper()} {kind or 'UNKNOWN'} is not permitted")
+            raise PolicyError(
+                f"{statement.key.upper()} {kind or 'UNKNOWN'} is not permitted"
+            )
         target = _write_target(statement)
         if target is None:
-            raise PolicyError("could not determine the target of this statement, rejecting")
+            raise PolicyError(
+                "could not determine the target of this statement, rejecting"
+            )
         qualified = _schema_prefix(target)
         if not qualified:
             raise PolicyError(
@@ -220,7 +244,9 @@ def _explain_body(statement: exp.Command) -> str:
     would bypass the write-target allowlist entirely.
     """
     remainder = statement.args.get("expression")
-    text = remainder.this if isinstance(remainder, exp.Literal) else str(remainder or "")
+    text = (
+        remainder.this if isinstance(remainder, exp.Literal) else str(remainder or "")
+    )
     return re.sub(r"^\s*PLAN\s+FOR\s+", "", text, flags=re.IGNORECASE)
 
 

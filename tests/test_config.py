@@ -20,7 +20,7 @@
 import pytest
 from pydantic import ValidationError
 
-from drill_mcp.config import Config, ConfigError, load_config
+from drill_mcp.config import ConfigError, load_config
 
 
 def test_defaults_are_conservative():
@@ -36,7 +36,9 @@ def test_defaults_are_conservative():
 
 def test_loads_from_yaml_file(tmp_path):
     path = tmp_path / "drill.yaml"
-    path.write_text("url: http://drill:8047\nmax_rows: 50\nwritable_plugins: [dfs.tmp]\n")
+    path.write_text(
+        "url: http://drill:8047\nmax_rows: 50\nwritable_plugins: [dfs.tmp]\n"
+    )
     cfg = load_config(str(path), env={})
     assert cfg.url == "http://drill:8047"
     assert cfg.max_rows == 50
@@ -66,7 +68,9 @@ def test_cli_overrides_env(tmp_path):
 
 
 def test_credentials_read_from_env():
-    cfg = load_config(env={"DRILL_USER": "alice", "DRILL_PASSWORD": "s3cret", "DRILL_AUTH": "basic"})
+    cfg = load_config(
+        env={"DRILL_USER": "alice", "DRILL_PASSWORD": "s3cret", "DRILL_AUTH": "basic"}
+    )
     assert cfg.user == "alice"
     assert cfg.password == "s3cret"
 

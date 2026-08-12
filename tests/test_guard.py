@@ -38,13 +38,17 @@ class TestSqlglotAssumptions:
         assert isinstance(stmt, exp.Select)
 
     def test_table_exposes_catalog_db_name(self):
-        table = sqlglot.parse_one("SELECT * FROM dfs.tmp.foo", read="drill").find(exp.Table)
+        table = sqlglot.parse_one("SELECT * FROM dfs.tmp.foo", read="drill").find(
+            exp.Table
+        )
         assert table.catalog == "dfs"
         assert table.db == "tmp"
         assert table.name == "foo"
 
     def test_two_part_name_populates_db_not_catalog(self):
-        table = sqlglot.parse_one("SELECT * FROM sys.options", read="drill").find(exp.Table)
+        table = sqlglot.parse_one("SELECT * FROM sys.options", read="drill").find(
+            exp.Table
+        )
         assert table.catalog == ""
         assert table.db == "sys"
         assert table.name == "options"

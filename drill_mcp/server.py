@@ -95,7 +95,9 @@ class DrillTools:
         query_text = str(profile.get("query") or "").lower()
         if not query_text:
             return False
-        return any(schema.lower() in query_text for schema in self._policy.hidden_schemas)
+        return any(
+            schema.lower() in query_text for schema in self._policy.hidden_schemas
+        )
 
     def _visible(self, schema: str | None) -> bool:
         # Fail closed, not open: an item this function cannot identify (no
@@ -127,7 +129,9 @@ class DrillTools:
             # an unexpected exception's text is exactly what might carry a
             # path or internal detail; `from exc` keeps it for a developer
             # without surfacing it to the model.
-            raise ToolError("could not check this SQL against policy; rejecting") from exc
+            raise ToolError(
+                "could not check this SQL against policy; rejecting"
+            ) from exc
 
         limit = self._effective_max_rows(max_rows)
         try:
@@ -149,6 +153,12 @@ class DrillTools:
         rows = result.rows
         if self._policy.hidden_schemas and is_show_command(sql):
             rows = [row for row in rows if self._visible(_first_value(row))]
+
+        # Belt-and-suspenders: both backend clients already cap `rows` to
+        # `limit`, but this tool method is the last chokepoint before the
+        # model sees the data, so the cap is enforced here too rather than
+        # trusted from below.
+        rows = rows[:limit]
 
         payload: dict[str, Any] = {
             "columns": result.columns,
@@ -287,7 +297,9 @@ def build_server(config: Config) -> MCPServer:
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="drill-mcp", description="MCP server for Apache Drill")
+    parser = argparse.ArgumentParser(
+        prog="drill-mcp", description="MCP server for Apache Drill"
+    )
     parser.add_argument("--config", help="path to a YAML config file")
     parser.add_argument("--url", help="Drill HTTP endpoint, e.g. http://localhost:8047")
     parser.add_argument("--backend", choices=["rest", "jdbc"])

@@ -154,7 +154,9 @@ def test_connection_is_reused(fake_jaydebeapi):
 
 
 def test_basic_auth_credentials_are_passed(fake_jaydebeapi):
-    make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+    make_client(auth="basic", user="alice", password="s3cret").query(
+        "SELECT 1", max_rows=1
+    )
     assert fake_jaydebeapi.connect.call_args.args[2] == ["alice", "s3cret"]
 
 
@@ -195,9 +197,13 @@ def test_close_is_safe_before_connecting():
 
 
 def test_driver_error_does_not_leak_the_password(fake_jaydebeapi):
-    fake_jaydebeapi.connect.side_effect = RuntimeError("auth failed for user alice/s3cret")
+    fake_jaydebeapi.connect.side_effect = RuntimeError(
+        "auth failed for user alice/s3cret"
+    )
     with pytest.raises(DrillError) as exc_info:
-        make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+        make_client(auth="basic", user="alice", password="s3cret").query(
+            "SELECT 1", max_rows=1
+        )
     message = str(exc_info.value)
     # The driver's exception text can itself contain the password we passed
     # to jaydebeapi.connect() (e.g. an auth-failure message that echoes its
@@ -213,7 +219,9 @@ def test_query_error_does_not_leak_the_password(fake_jaydebeapi):
     cursor = fake_jaydebeapi.connect.return_value.cursor.return_value
     cursor.execute.side_effect = RuntimeError("query failed: password was s3cret")
     with pytest.raises(DrillError) as exc_info:
-        make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+        make_client(auth="basic", user="alice", password="s3cret").query(
+            "SELECT 1", max_rows=1
+        )
     assert "s3cret" not in str(exc_info.value)
 
 
@@ -232,5 +240,11 @@ def test_close_error_does_not_leak_the_password(fake_jaydebeapi):
 
 def test_management_methods_are_not_implemented(fake_jaydebeapi):
     client = make_client()
-    for name in ("storage_plugins", "cluster_status", "profiles", "profile", "cancel_query"):
+    for name in (
+        "storage_plugins",
+        "cluster_status",
+        "profiles",
+        "profile",
+        "cancel_query",
+    ):
         assert not hasattr(client, name)

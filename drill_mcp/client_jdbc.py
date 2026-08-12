@@ -161,7 +161,9 @@ class JdbcClient:
             raise DrillError(self._scrub(str(exc))) from exc
         return QueryResult(
             columns=columns,
-            rows=[dict(zip(columns, row)) for row in rows],
+            # JDBC row tuples are column-aligned by the driver; tolerate a
+            # mismatch rather than adding an error path to a reviewed hot loop.
+            rows=[dict(zip(columns, row, strict=False)) for row in rows],
             truncated=max_rows > 0 and len(rows) >= max_rows,
             metadata=metadata,
         )

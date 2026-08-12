@@ -53,7 +53,9 @@ _IDENTIFIER = re.compile(r"[A-Za-z0-9_$-]+")
 # Drill's j_security_check returns HTTP 200 even on a wrong password; the only
 # signal is this marker string inside the HTML error page body. Matched
 # case-insensitively, with flexible whitespace.
-_INVALID_CREDENTIALS = re.compile(r"invalid\s+username\s*/\s*password\s+credentials", re.IGNORECASE)
+_INVALID_CREDENTIALS = re.compile(
+    r"invalid\s+username\s*/\s*password\s+credentials", re.IGNORECASE
+)
 
 # Approximates real tag grammar (requires '/', a letter, or '!' after '<') so
 # a stray unmatched '<' -- e.g. "1 < 2" in unrelated page text -- can't be
@@ -81,7 +83,10 @@ def _contains_invalid_credentials_marker(body: str) -> bool:
     either check alone, never less. This is the correct posture for a check
     that gates authentication: fail closed, not fail clever.
     """
-    return bool(_INVALID_CREDENTIALS.search(body) or _INVALID_CREDENTIALS.search(_strip_tags(body)))
+    return bool(
+        _INVALID_CREDENTIALS.search(body)
+        or _INVALID_CREDENTIALS.search(_strip_tags(body))
+    )
 
 
 class DrillError(Exception):
@@ -193,7 +198,9 @@ def _safe_url(url: str) -> str:
     parsed = urlparse(url)
     if not parsed.hostname:
         return url
-    netloc = parsed.hostname if parsed.port is None else f"{parsed.hostname}:{parsed.port}"
+    netloc = (
+        parsed.hostname if parsed.port is None else f"{parsed.hostname}:{parsed.port}"
+    )
     return urlunparse(parsed._replace(netloc=netloc))
 
 
@@ -286,13 +293,11 @@ def fetch_plugin_type(query: Query, schema: str) -> str | None:
 
 def fetch_schemas(query: Query) -> list[dict[str, Any]]:
     result = query(
-        "SELECT SCHEMA_NAME, TYPE FROM INFORMATION_SCHEMA.`SCHEMATA` "
-        "ORDER BY SCHEMA_NAME",
+        "SELECT SCHEMA_NAME, TYPE FROM INFORMATION_SCHEMA.`SCHEMATA` ORDER BY SCHEMA_NAME",
         10_000,
     )
     return [
-        {"name": row.get("SCHEMA_NAME"), "type": row.get("TYPE")}
-        for row in result.rows
+        {"name": row.get("SCHEMA_NAME"), "type": row.get("TYPE")} for row in result.rows
     ]
 
 
@@ -313,7 +318,9 @@ def fetch_tables(query: Query, schema: str) -> list[dict[str, Any]]:
                 tables.append({"name": name[: -len(".view.drill")], "type": "VIEW"})
             else:
                 is_dir = str(row.get("isDirectory", "")).lower() == "true"
-                tables.append({"name": name, "type": "DIRECTORY" if is_dir else "TABLE"})
+                tables.append(
+                    {"name": name, "type": "DIRECTORY" if is_dir else "TABLE"}
+                )
         return sorted(tables, key=lambda t: t["name"])
 
     result = query(
@@ -353,7 +360,9 @@ def _probe_target(schema: str, table: str) -> str:
     return f"{quote_identifier_path(schema)}.{quote_identifier(table)}"
 
 
-def _columns_from_metadata(columns: list[str], metadata: list[str | None]) -> list[dict[str, Any]]:
+def _columns_from_metadata(
+    columns: list[str], metadata: list[str | None]
+) -> list[dict[str, Any]]:
     """Build `describe_table` rows from a probe's `columns`/`metadata`.
 
     Never reads `result.rows` -- the caller passes only `columns` and
@@ -368,13 +377,17 @@ def _columns_from_metadata(columns: list[str], metadata: list[str | None]) -> li
     # response) drop trailing columns.
     types = list(metadata) + [None] * max(0, len(columns) - len(metadata))
     result = []
-    for name, type_str in zip(columns, types):
+    # types was padded to at least len(columns) above, so truncating a longer
+    # metadata array here is the intended behaviour, not an oversight.
+    for name, type_str in zip(columns, types, strict=False):
         data_type = _TYPE_PRECISION.sub("", type_str) if type_str else None
         result.append({"name": name, "data_type": data_type, "nullable": None})
     return result
 
 
-def _probe_columns(query: Query, schema: str, table: str, plugin_type: str) -> list[dict[str, Any]]:
+def _probe_columns(
+    query: Query, schema: str, table: str, plugin_type: str
+) -> list[dict[str, Any]]:
     """Discover columns for a dynamic-schema plugin by probing one row.
 
     `DESCRIBE` cannot answer for `file`/`mongo`/`splunk`: their schema is
@@ -621,8 +634,12 @@ class RestClient:
         return redact(_json(response, _safe_url(self._config.url)))
 
     def cluster_status(self) -> dict[str, Any]:
-        cluster = _json(self._request("GET", "/cluster.json"), _safe_url(self._config.url))
-        status = _json(self._request("GET", "/status.json"), _safe_url(self._config.url))
+        cluster = _json(
+            self._request("GET", "/cluster.json"), _safe_url(self._config.url)
+        )
+        status = _json(
+            self._request("GET", "/status.json"), _safe_url(self._config.url)
+        )
         merged = dict(cluster) if isinstance(cluster, dict) else {"cluster": cluster}
         if isinstance(status, dict):
             merged.update(status)

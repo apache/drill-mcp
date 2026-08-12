@@ -65,7 +65,8 @@ class TestQuoting:
             "foo\\bar",
             "foo`bar",
             "dfs.tmp",
-            "foo\n",  # trailing newline: `$` matches before it under .match(), not under .fullmatch()
+            # trailing newline: `$` matches before it under .match(), not under .fullmatch()
+            "foo\n",
         ],
     )
     def test_literal_rejects_dangerous_input(self, bad):
@@ -173,7 +174,9 @@ class TestQuery:
     @respx.mock
     def test_drill_error_text_is_surfaced(self):
         respx.post(f"{BASE}/query.json").mock(
-            return_value=httpx.Response(500, json={"errorMessage": "VALIDATION ERROR: no such table"})
+            return_value=httpx.Response(
+                500, json={"errorMessage": "VALIDATION ERROR: no such table"}
+            )
         )
         with pytest.raises(DrillError, match="no such table"):
             make_client().query("SELECT * FROM nope", max_rows=10)
@@ -183,10 +186,14 @@ class TestQuery:
         # A real connection failure affects every request to the host, including
         # the basic-auth login that precedes the first query, so both endpoints
         # must fail the same way for this to simulate a real outage.
-        respx.post(f"{BASE}/j_security_check").mock(side_effect=httpx.ConnectError("refused"))
+        respx.post(f"{BASE}/j_security_check").mock(
+            side_effect=httpx.ConnectError("refused")
+        )
         respx.post(f"{BASE}/query.json").mock(side_effect=httpx.ConnectError("refused"))
         with pytest.raises(DrillError) as exc:
-            make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+            make_client(auth="basic", user="alice", password="s3cret").query(
+                "SELECT 1", max_rows=1
+            )
         assert BASE in str(exc.value)
         assert "s3cret" not in str(exc.value)
 
@@ -200,7 +207,9 @@ class TestQuery:
         # echoes config.url back to the model must not leak the password
         # embedded there.
         url = "http://alice:s3cret@drill:8047"
-        respx.post(f"{url}/j_security_check").mock(side_effect=httpx.ConnectError("refused"))
+        respx.post(f"{url}/j_security_check").mock(
+            side_effect=httpx.ConnectError("refused")
+        )
         respx.post(f"{url}/query.json").mock(side_effect=httpx.ConnectError("refused"))
         with pytest.raises(DrillError) as exc:
             make_client(url=url, auth="basic", user="alice", password="s3cret").query(
@@ -221,17 +230,23 @@ class TestQuery:
 class TestBasicAuth:
     @respx.mock
     def test_logs_in_before_the_first_query(self):
-        login = respx.post(f"{BASE}/j_security_check").mock(return_value=httpx.Response(200))
+        login = respx.post(f"{BASE}/j_security_check").mock(
+            return_value=httpx.Response(200)
+        )
         respx.post(f"{BASE}/query.json").mock(
             return_value=httpx.Response(200, json={"columns": [], "rows": []})
         )
-        make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+        make_client(auth="basic", user="alice", password="s3cret").query(
+            "SELECT 1", max_rows=1
+        )
         assert login.called
         assert b"j_username=alice" in login.calls.last.request.read()
 
     @respx.mock
     def test_session_is_reused_across_queries(self):
-        login = respx.post(f"{BASE}/j_security_check").mock(return_value=httpx.Response(200))
+        login = respx.post(f"{BASE}/j_security_check").mock(
+            return_value=httpx.Response(200)
+        )
         respx.post(f"{BASE}/query.json").mock(
             return_value=httpx.Response(200, json={"columns": [], "rows": []})
         )
@@ -242,24 +257,32 @@ class TestBasicAuth:
 
     @respx.mock
     def test_reauthenticates_once_on_401(self):
-        login = respx.post(f"{BASE}/j_security_check").mock(return_value=httpx.Response(200))
+        login = respx.post(f"{BASE}/j_security_check").mock(
+            return_value=httpx.Response(200)
+        )
         query = respx.post(f"{BASE}/query.json").mock(
             side_effect=[
                 httpx.Response(401),
                 httpx.Response(200, json={"columns": ["a"], "rows": []}),
             ]
         )
-        result = make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+        result = make_client(auth="basic", user="alice", password="s3cret").query(
+            "SELECT 1", max_rows=1
+        )
         assert result.columns == ["a"]
         assert login.call_count == 2
         assert query.call_count == 2
 
     @respx.mock
     def test_gives_up_after_one_retry(self):
-        login = respx.post(f"{BASE}/j_security_check").mock(return_value=httpx.Response(200))
+        login = respx.post(f"{BASE}/j_security_check").mock(
+            return_value=httpx.Response(200)
+        )
         query = respx.post(f"{BASE}/query.json").mock(return_value=httpx.Response(401))
         with pytest.raises(DrillError, match="authentication"):
-            make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+            make_client(auth="basic", user="alice", password="s3cret").query(
+                "SELECT 1", max_rows=1
+            )
         # Without bounded call counts, an unbounded retry loop would hang
         # instead of failing -- these assertions are what actually prove the
         # retry is bounded to exactly one attempt.
@@ -270,7 +293,9 @@ class TestBasicAuth:
     def test_login_failure_is_reported(self):
         respx.post(f"{BASE}/j_security_check").mock(return_value=httpx.Response(401))
         with pytest.raises(DrillError, match="authentication"):
-            make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+            make_client(auth="basic", user="alice", password="s3cret").query(
+                "SELECT 1", max_rows=1
+            )
 
     @respx.mock
     def test_login_rejects_200_with_invalid_credentials_body(self):
@@ -292,7 +317,9 @@ class TestBasicAuth:
             )
         )
         with pytest.raises(DrillError, match="authentication") as exc:
-            make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+            make_client(auth="basic", user="alice", password="s3cret").query(
+                "SELECT 1", max_rows=1
+            )
         assert "s3cret" not in str(exc.value)
 
     @respx.mock
@@ -307,7 +334,9 @@ class TestBasicAuth:
             )
         )
         with pytest.raises(DrillError, match="authentication") as exc:
-            make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+            make_client(auth="basic", user="alice", password="s3cret").query(
+                "SELECT 1", max_rows=1
+            )
         assert "s3cret" not in str(exc.value)
 
     @respx.mock
@@ -323,13 +352,14 @@ class TestBasicAuth:
             return_value=httpx.Response(
                 200,
                 text=(
-                    "<div>Warning: 1 < 2 in the system. "
-                    "Invalid username/password credentials</div>"
+                    "<div>Warning: 1 < 2 in the system. Invalid username/password credentials</div>"
                 ),
             )
         )
         with pytest.raises(DrillError, match="authentication") as exc:
-            make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+            make_client(auth="basic", user="alice", password="s3cret").query(
+                "SELECT 1", max_rows=1
+            )
         assert "s3cret" not in str(exc.value)
 
     @respx.mock
@@ -342,16 +372,22 @@ class TestBasicAuth:
             )
         )
         with pytest.raises(DrillError, match="authentication") as exc:
-            make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+            make_client(auth="basic", user="alice", password="s3cret").query(
+                "SELECT 1", max_rows=1
+            )
         assert "s3cret" not in str(exc.value)
 
     @respx.mock
     def test_login_rejects_plain_marker_with_no_markup(self):
         respx.post(f"{BASE}/j_security_check").mock(
-            return_value=httpx.Response(200, text="Invalid username/password credentials")
+            return_value=httpx.Response(
+                200, text="Invalid username/password credentials"
+            )
         )
         with pytest.raises(DrillError, match="authentication") as exc:
-            make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+            make_client(auth="basic", user="alice", password="s3cret").query(
+                "SELECT 1", max_rows=1
+            )
         assert "s3cret" not in str(exc.value)
 
     @respx.mock
@@ -362,7 +398,9 @@ class TestBasicAuth:
         respx.post(f"{BASE}/query.json").mock(
             return_value=httpx.Response(200, json={"columns": ["a"], "rows": []})
         )
-        result = make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+        result = make_client(auth="basic", user="alice", password="s3cret").query(
+            "SELECT 1", max_rows=1
+        )
         assert login.called
         assert result.columns == ["a"]
 
@@ -379,7 +417,9 @@ class TestBasicAuth:
         respx.post(f"{BASE}/query.json").mock(
             return_value=httpx.Response(200, json={"columns": ["a"], "rows": []})
         )
-        result = make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+        result = make_client(auth="basic", user="alice", password="s3cret").query(
+            "SELECT 1", max_rows=1
+        )
         assert login.called
         assert result.columns == ["a"]
 
@@ -399,14 +439,18 @@ class TestBasicAuth:
         )
         query = respx.post(f"{BASE}/query.json").mock(return_value=httpx.Response(401))
         with pytest.raises(DrillError, match="authentication") as exc:
-            make_client(auth="basic", user="alice", password="s3cret").query("SELECT 1", max_rows=1)
+            make_client(auth="basic", user="alice", password="s3cret").query(
+                "SELECT 1", max_rows=1
+            )
         assert "s3cret" not in str(exc.value)
         assert login.call_count == 2
         assert query.call_count == 1
 
     @respx.mock
     def test_no_login_when_auth_is_none(self):
-        login = respx.post(f"{BASE}/j_security_check").mock(return_value=httpx.Response(200))
+        login = respx.post(f"{BASE}/j_security_check").mock(
+            return_value=httpx.Response(200)
+        )
         respx.post(f"{BASE}/query.json").mock(
             return_value=httpx.Response(200, json={"columns": [], "rows": []})
         )
@@ -428,7 +472,9 @@ class TestKerberosAuth:
         with pytest.raises(DrillError, match=r"drill-mcp\[kerberos\]"):
             make_client(auth="kerberos")
 
-    def test_extra_present_wires_the_auth_object_into_the_http_client(self, monkeypatch):
+    def test_extra_present_wires_the_auth_object_into_the_http_client(
+        self, monkeypatch
+    ):
         class _FakeSpnegoAuth(httpx.Auth):
             def auth_flow(self, request):
                 yield request
@@ -462,7 +508,8 @@ class TestMetadata:
     def test_tables_filters_by_schema(self):
         route = respx.post(f"{BASE}/query.json").mock(
             return_value=query_response(
-                ["TABLE_NAME", "TABLE_TYPE"], [{"TABLE_NAME": "t", "TABLE_TYPE": "TABLE"}]
+                ["TABLE_NAME", "TABLE_TYPE"],
+                [{"TABLE_NAME": "t", "TABLE_TYPE": "TABLE"}],
             )
         )
         assert make_client().tables("dfs.tmp") == [{"name": "t", "type": "TABLE"}]
@@ -547,17 +594,24 @@ class TestFilePluginMetadata:
 
     @staticmethod
     def _schemata(plugin_type):
-        return query_response(["SCHEMA_NAME", "TYPE"], [{"SCHEMA_NAME": "dfs.tmp", "TYPE": plugin_type}])
+        return query_response(
+            ["SCHEMA_NAME", "TYPE"], [{"SCHEMA_NAME": "dfs.tmp", "TYPE": plugin_type}]
+        )
 
     @respx.mock
     def test_tables_uses_show_files_for_a_file_plugin(self):
         route = respx.post(f"{BASE}/query.json").mock(
             side_effect=[
                 self._schemata("file"),
-                query_response(["name", "isDirectory"], [{"name": "sales.csv", "isDirectory": "false"}]),
+                query_response(
+                    ["name", "isDirectory"],
+                    [{"name": "sales.csv", "isDirectory": "false"}],
+                ),
             ]
         )
-        assert make_client().tables("dfs.tmp") == [{"name": "sales.csv", "type": "TABLE"}]
+        assert make_client().tables("dfs.tmp") == [
+            {"name": "sales.csv", "type": "TABLE"}
+        ]
         assert b"SHOW FILES FROM" in route.calls[1].request.read()
 
     @respx.mock
@@ -565,7 +619,10 @@ class TestFilePluginMetadata:
         respx.post(f"{BASE}/query.json").mock(
             side_effect=[
                 self._schemata("file"),
-                query_response(["name", "isDirectory"], [{"name": "year=2024", "isDirectory": "true"}]),
+                query_response(
+                    ["name", "isDirectory"],
+                    [{"name": "year=2024", "isDirectory": "true"}],
+                ),
             ]
         )
         assert make_client().tables("dfs.tmp")[0]["type"] == "DIRECTORY"
@@ -575,17 +632,25 @@ class TestFilePluginMetadata:
         respx.post(f"{BASE}/query.json").mock(
             side_effect=[
                 self._schemata("file"),
-                query_response(["name", "isDirectory"], [{"name": "top_sales.view.drill", "isDirectory": "false"}]),
+                query_response(
+                    ["name", "isDirectory"],
+                    [{"name": "top_sales.view.drill", "isDirectory": "false"}],
+                ),
             ]
         )
-        assert make_client().tables("dfs.tmp") == [{"name": "top_sales", "type": "VIEW"}]
+        assert make_client().tables("dfs.tmp") == [
+            {"name": "top_sales", "type": "VIEW"}
+        ]
 
     @respx.mock
     def test_tables_uses_information_schema_for_a_non_file_plugin(self):
         route = respx.post(f"{BASE}/query.json").mock(
             side_effect=[
                 self._schemata("jdbc"),
-                query_response(["TABLE_NAME", "TABLE_TYPE"], [{"TABLE_NAME": "t", "TABLE_TYPE": "TABLE"}]),
+                query_response(
+                    ["TABLE_NAME", "TABLE_TYPE"],
+                    [{"TABLE_NAME": "t", "TABLE_TYPE": "TABLE"}],
+                ),
             ]
         )
         assert make_client().tables("mysql.app") == [{"name": "t", "type": "TABLE"}]
@@ -673,7 +738,9 @@ class TestFilePluginMetadata:
                 httpx.Response(
                     500,
                     json={
-                        "errorMessage": "VALIDATION ERROR: Object 'sales.csv' not found within 'dfs.tmp'"
+                        "errorMessage": (
+                            "VALIDATION ERROR: Object 'sales.csv' not found within 'dfs.tmp'"
+                        )
                     },
                 ),
             ]
@@ -705,7 +772,9 @@ class TestFilePluginMetadata:
         # `_probe_target`/mongo interpolation sites -- `fetch_plugin_type`'s
         # own validation rejects it first, before any query (including the
         # SCHEMATA lookup) fires.
-        route = respx.post(f"{BASE}/query.json").mock(return_value=self._schemata("file"))
+        route = respx.post(f"{BASE}/query.json").mock(
+            return_value=self._schemata("file")
+        )
         with pytest.raises(DrillError, match="invalid identifier"):
             make_client().columns("dfs'; DROP TABLE x --", "sales.csv")
         assert not route.called
@@ -792,14 +861,18 @@ class TestFilePluginMetadata:
     def test_columns_table_name_guard_rejects_a_backtick_before_any_query_fires(self):
         # The `_FILE_IDENTIFIER` guard in `fetch_columns` catches this before
         # `plugin_type` (and thus `quote_identifier_path`) is ever reached.
-        route = respx.post(f"{BASE}/query.json").mock(return_value=self._schemata("file"))
+        route = respx.post(f"{BASE}/query.json").mock(
+            return_value=self._schemata("file")
+        )
         with pytest.raises(DrillError, match="invalid identifier"):
             make_client().columns("dfs.tmp", "sales`; DROP TABLE x --.csv")
         assert not route.called
 
     @respx.mock
     def test_columns_rejects_a_bare_dot_dot_table_name(self):
-        route = respx.post(f"{BASE}/query.json").mock(return_value=self._schemata("file"))
+        route = respx.post(f"{BASE}/query.json").mock(
+            return_value=self._schemata("file")
+        )
         with pytest.raises(DrillError, match="invalid identifier"):
             make_client().columns("dfs.tmp", "..")
         assert not route.called
@@ -813,7 +886,13 @@ class TestFilePluginMetadata:
                 self._schemata("jdbc"),
                 query_response(
                     ["COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE"],
-                    [{"COLUMN_NAME": "id", "DATA_TYPE": "INTEGER", "IS_NULLABLE": "NO"}],
+                    [
+                        {
+                            "COLUMN_NAME": "id",
+                            "DATA_TYPE": "INTEGER",
+                            "IS_NULLABLE": "NO",
+                        }
+                    ],
                 ),
             ]
         )
@@ -952,7 +1031,9 @@ class TestManagement:
     @respx.mock
     def test_profile_fetches_one_query(self):
         respx.get(f"{BASE}/profiles/abc.json").mock(
-            return_value=httpx.Response(200, json={"queryId": "abc", "state": "COMPLETED"})
+            return_value=httpx.Response(
+                200, json={"queryId": "abc", "state": "COMPLETED"}
+            )
         )
         assert make_client().profile("abc")["state"] == "COMPLETED"
 

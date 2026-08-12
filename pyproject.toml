@@ -46,7 +46,7 @@ dependencies = [
 [project.optional-dependencies]
 jdbc = ["jaydebeapi>=1.2.3", "JPype1>=1.5"]
 kerberos = ["httpx-gssapi>=0.3"]
-dev = ["pytest>=8.0", "respx>=0.21", "pytest-cov>=5.0"]
+dev = ["pytest>=8.0", "respx>=0.21", "pytest-cov>=5.0", "ruff>=0.6"]
 
 [project.scripts]
 drill-mcp = "drill_mcp.server:main"
