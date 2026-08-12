@@ -101,10 +101,13 @@ def _check(sql: str, policy: Policy, depth: int) -> None:
 
     try:
         statements = [s for s in sqlglot.parse(sql, read=DIALECT) if s is not None]
-    except sqlglot.errors.SqlglotError as exc:
-        # Catches both ParseError and TokenError (siblings under SqlglotError,
-        # not parent/child) — malformed input such as an unterminated string
-        # literal must be a PolicyError, never an uncaught crash.
+    except Exception as exc:
+        # Catches ParseError and TokenError (siblings under SqlglotError, not
+        # parent/child) as well as anything else the parser can throw on
+        # adversarial input, such as a RecursionError from deeply nested
+        # parentheses. A parse failure of any kind must be a PolicyError,
+        # never an uncaught crash — scoped to this call only, so a PolicyError
+        # raised by the policy logic further down is never caught here.
         raise PolicyError(
             f"could not parse SQL, so it cannot be checked against policy and is rejected: {exc}"
         ) from exc

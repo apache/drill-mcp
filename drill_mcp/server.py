@@ -56,16 +56,29 @@ class DrillTools:
             raise ToolError(f"schema '{schema}' is hidden by configuration")
 
     def _visible(self, schema: str | None) -> bool:
-        return not (schema and matches_prefix(schema, self._policy.hidden_schemas))
+        return not matches_prefix(schema or "", self._policy.hidden_schemas)
 
-    # -- tools -------------------------------------------------------------
+    # -- query and metadata tools -------------------------------------------
 
     def run_query(self, sql: str, max_rows: int | None = None) -> dict[str, Any]:
         """Run a single SQL statement against Drill and return its rows."""
+        if not isinstance(sql, str):
+            raise ToolError("sql must be a string")
+        if max_rows is not None and not isinstance(max_rows, int):
+            raise ToolError("max_rows must be an integer")
+
         try:
             check(sql, self._policy)
         except PolicyError as exc:
             raise ToolError(str(exc)) from exc
+        except Exception as exc:
+            # A parse failure the guard itself did not convert (e.g. an
+            # exception type it does not anticipate) must still never reach
+            # the caller as a raw traceback. Deliberately no str(exc) here:
+            # an unexpected exception's text is exactly what might carry a
+            # path or internal detail; `from exc` keeps it for a developer
+            # without surfacing it to the model.
+            raise ToolError("could not check this SQL against policy; rejecting") from exc
 
         limit = self._effective_max_rows(max_rows)
         try:

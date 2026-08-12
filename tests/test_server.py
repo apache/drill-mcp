@@ -92,6 +92,29 @@ class TestRunQuery:
         with pytest.raises(ToolError, match="no such table"):
             make_tools(client).run_query("SELECT * FROM nope")
 
+    def test_pathological_sql_that_crashes_the_parser_is_rejected_without_a_traceback(self):
+        client = MagicMock()
+        deeply_nested = "SELECT " + "(" * 400 + "1" + ")" * 400
+        with pytest.raises(ToolError) as excinfo:
+            make_tools(client).run_query(deeply_nested)
+        client.query.assert_not_called()
+        message = str(excinfo.value)
+        assert "/" not in message
+        assert "\\" not in message
+        assert ".py" not in message
+
+    def test_non_string_sql_is_rejected_as_a_tool_error(self):
+        client = MagicMock()
+        with pytest.raises(ToolError, match="sql must be a string"):
+            make_tools(client).run_query(5)
+        client.query.assert_not_called()
+
+    def test_non_integer_max_rows_is_rejected_as_a_tool_error(self):
+        client = MagicMock()
+        with pytest.raises(ToolError, match="max_rows must be an integer"):
+            make_tools(client).run_query("SELECT 1", max_rows="10")
+        client.query.assert_not_called()
+
 
 class TestListSchemas:
     def test_returns_all_schemas_by_default(self):
@@ -127,6 +150,7 @@ class TestListTables:
         client = MagicMock()
         client.tables.return_value = [{"name": "t", "type": "TABLE"}]
         assert make_tools(client).list_tables("dfs.tmp") == [{"name": "t", "type": "TABLE"}]
+        client.tables.assert_called_once_with("dfs.tmp")
 
     def test_hidden_schema_is_refused(self):
         client = MagicMock()
@@ -147,6 +171,7 @@ class TestDescribeTable:
         client = MagicMock()
         client.columns.return_value = [{"name": "id", "data_type": "INTEGER", "nullable": True}]
         assert make_tools(client).describe_table("dfs.tmp", "t")[0]["name"] == "id"
+        client.columns.assert_called_once_with("dfs.tmp", "t")
 
     def test_hidden_schema_is_refused(self):
         client = MagicMock()

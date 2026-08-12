@@ -176,6 +176,14 @@ class TestInjectionAttempts:
         with pytest.raises(PolicyError, match="parse"):
             check("SELECT * FROM t WHERE note = 'it''s", CLOSED)
 
+    def test_recursion_error_during_parsing_is_a_policy_error_not_a_crash(self):
+        # Deeply nested parentheses can blow the recursive-descent parser's
+        # stack with a RecursionError, which is not a SqlglotError. A parse
+        # failure of any kind must be rejected, never propagate raw.
+        deeply_nested = "SELECT " + "(" * 400 + "1" + ")" * 400
+        with pytest.raises(PolicyError, match="parse"):
+            check(deeply_nested, CLOSED)
+
 
 class TestMatchesPrefix:
     def test_exact_match(self):
