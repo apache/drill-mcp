@@ -9,3 +9,8 @@ build/
 # IDEs
 .idea/
 .vscode/
+/.claude/
+/.superpowers/
+.env
+.DS_Store
+
