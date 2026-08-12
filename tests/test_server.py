@@ -223,6 +223,43 @@ class TestManagementTools:
         client.profile.return_value = {"queryId": "abc"}
         assert make_tools(client).get_profile("abc")["queryId"] == "abc"
 
+    def test_get_profile_redacts_secret_looking_keys(self):
+        # Profiles are cluster-wide: a full profile embeds Drill's
+        # serialized physical plan, which for JDBC/HTTP plugins can carry
+        # plugin configuration (passwords, tokens). This must go through the
+        # same redaction as list_storage_plugins, not be returned unmodified.
+        client = MagicMock()
+        client.profile.return_value = {"queryId": "abc", "password": "hunter2"}
+        result = make_tools(client).get_profile("abc")
+        assert result["password"] == "***REDACTED***"
+        assert result["queryId"] == "abc"
+
+    def test_get_profile_is_refused_when_its_query_text_names_a_hidden_schema(self):
+        # A profile carries the query TEXT of whatever user ran it -- other
+        # users' queries, not just the caller's own. A hidden schema's name
+        # can leak out here as data even though it is unreachable directly,
+        # which is exactly the enumeration path the guard and hidden-schema
+        # filtering elsewhere were built to close.
+        client = MagicMock()
+        client.profile.return_value = {"queryId": "abc", "query": "SELECT * FROM sys.options"}
+        with pytest.raises(ToolError, match="hidden"):
+            make_tools(client, hidden_schemas=["sys"]).get_profile("abc")
+
+    def test_list_profiles_redacts_secret_looking_keys(self):
+        client = MagicMock()
+        client.profiles.return_value = [{"queryId": "abc", "password": "hunter2"}]
+        result = make_tools(client).list_profiles()
+        assert result[0]["password"] == "***REDACTED***"
+
+    def test_list_profiles_drops_entries_whose_query_text_names_a_hidden_schema(self):
+        client = MagicMock()
+        client.profiles.return_value = [
+            {"queryId": "abc", "query": "SELECT * FROM sys.options"},
+            {"queryId": "def", "query": "SELECT * FROM dfs.tmp.x"},
+        ]
+        result = make_tools(client, hidden_schemas=["sys"]).list_profiles()
+        assert [p["queryId"] for p in result] == ["def"]
+
     def test_cancel_query(self):
         client = MagicMock()
         client.cancel_query.return_value = "Cancelled"
