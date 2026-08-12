@@ -1307,10 +1307,26 @@ git commit -m "feat: Drill REST client with auth and query execution"
 
 **Interfaces:**
 - Consumes: `RestClient`, `QueryResult`, `DrillError`, `quote_literal`, `quote_literal_path` from Task 5; `redact.redact` from Task 4
+- Produces:
+  - `drill_mcp.client_rest.quote_identifier_path(value: str) -> str` — validates a
+    dotted path and returns it backtick-quoted (`dfs.tmp` → `` `dfs`.`tmp` ``).
+    Needed for `SHOW FILES FROM` and `DESCRIBE`, which take identifiers rather
+    than string literals. Same character allowlist as `quote_literal_path`;
+    rejects rather than escapes.
 - Produces, all on `RestClient`:
+  - `plugin_type(schema: str) -> str | None` — the storage plugin TYPE backing a schema
   - `schemas() -> list[dict]` — keys `name`, `type`
   - `tables(schema: str) -> list[dict]` — keys `name`, `type`
   - `columns(schema: str, table: str) -> list[dict]` — keys `name`, `data_type`, `nullable`
+
+**Why `tables` and `columns` branch on plugin type.** File-based plugins (`dfs`,
+`s3`) do not register their contents in `INFORMATION_SCHEMA`. Querying
+`INFORMATION_SCHEMA.`TABLES`` for `dfs.tmp` returns an empty list that looks
+exactly like an empty workspace, so file plugins need `SHOW FILES FROM` instead,
+and `DESCRIBE` rather than `INFORMATION_SCHEMA.`COLUMNS``. `sqlalchemy-drill`'s
+`get_table_names` and `get_columns` branch the same way. `DESCRIBE` is chosen
+over that dialect's `SELECT * ... LIMIT 1` fallback deliberately: reading a row
+of user data to answer a metadata question is the wrong trade here.
   - `storage_plugins() -> list[dict]` — redacted
   - `cluster_status() -> dict`
   - `profiles(limit: int) -> list[dict]`
@@ -1363,6 +1379,107 @@ class TestMetadata:
     def test_metadata_rejects_injection_in_schema_name(self):
         with pytest.raises(DrillError, match="invalid identifier"):
             make_client().tables("dfs'; DROP TABLE x --")
+
+
+class TestFilePluginMetadata:
+    """File plugins are absent from INFORMATION_SCHEMA; they need SHOW FILES."""
+
+    @staticmethod
+    def _schemata(plugin_type):
+        return query_response(["SCHEMA_NAME", "TYPE"], [{"SCHEMA_NAME": "dfs.tmp", "TYPE": plugin_type}])
+
+    @respx.mock
+    def test_tables_uses_show_files_for_a_file_plugin(self):
+        route = respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("file"),
+                query_response(["name", "isDirectory"], [{"name": "sales.csv", "isDirectory": "false"}]),
+            ]
+        )
+        assert make_client().tables("dfs.tmp") == [{"name": "sales.csv", "type": "TABLE"}]
+        assert b"SHOW FILES FROM" in route.calls[1].request.read()
+
+    @respx.mock
+    def test_show_files_marks_directories(self):
+        respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("file"),
+                query_response(["name", "isDirectory"], [{"name": "year=2024", "isDirectory": "true"}]),
+            ]
+        )
+        assert make_client().tables("dfs.tmp")[0]["type"] == "DIRECTORY"
+
+    @respx.mock
+    def test_show_files_strips_the_view_drill_suffix(self):
+        respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("file"),
+                query_response(["name", "isDirectory"], [{"name": "top_sales.view.drill", "isDirectory": "false"}]),
+            ]
+        )
+        assert make_client().tables("dfs.tmp") == [{"name": "top_sales", "type": "VIEW"}]
+
+    @respx.mock
+    def test_tables_uses_information_schema_for_a_non_file_plugin(self):
+        route = respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("jdbc"),
+                query_response(["TABLE_NAME", "TABLE_TYPE"], [{"TABLE_NAME": "t", "TABLE_TYPE": "TABLE"}]),
+            ]
+        )
+        assert make_client().tables("mysql.app") == [{"name": "t", "type": "TABLE"}]
+        assert b"INFORMATION_SCHEMA" in route.calls[1].request.read()
+
+    @respx.mock
+    def test_columns_uses_describe_for_a_file_plugin(self):
+        route = respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("file"),
+                query_response(
+                    ["COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE"],
+                    [{"COLUMN_NAME": "id", "DATA_TYPE": "BIGINT", "IS_NULLABLE": "YES"}],
+                ),
+            ]
+        )
+        assert make_client().columns("dfs.tmp", "sales.csv") == [
+            {"name": "id", "data_type": "BIGINT", "nullable": True}
+        ]
+        body = route.calls[1].request.read()
+        assert b"DESCRIBE" in body
+        # Metadata-only: never read user rows to answer a metadata question.
+        assert b"LIMIT 1" not in body
+        assert b"SELECT *" not in body
+
+    @respx.mock
+    def test_columns_uses_information_schema_for_a_non_file_plugin(self):
+        route = respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("jdbc"),
+                query_response(
+                    ["COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE"],
+                    [{"COLUMN_NAME": "id", "DATA_TYPE": "INTEGER", "IS_NULLABLE": "NO"}],
+                ),
+            ]
+        )
+        result = make_client().columns("mysql.app", "t")
+        assert result == [{"name": "id", "data_type": "INTEGER", "nullable": False}]
+        assert b"INFORMATION_SCHEMA" in route.calls[1].request.read()
+
+    @respx.mock
+    def test_unknown_plugin_type_falls_back_to_information_schema(self):
+        respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                query_response(["SCHEMA_NAME", "TYPE"], []),
+                query_response(["TABLE_NAME", "TABLE_TYPE"], []),
+            ]
+        )
+        assert make_client().tables("nope") == []
+
+    @respx.mock
+    def test_show_files_path_still_rejects_injection(self):
+        respx.post(f"{BASE}/query.json").mock(return_value=self._schemata("file"))
+        with pytest.raises(DrillError, match="invalid identifier"):
+            make_client().tables("dfs`; DROP TABLE x --")
 
     @respx.mock
     def test_metadata_rejects_injection_in_table_name(self):
@@ -1493,7 +1610,41 @@ Append these methods to `RestClient`:
             for row in result.rows
         ]
 
+    def plugin_type(self, schema: str) -> str | None:
+        """Return the storage plugin TYPE backing `schema`, or None if unknown.
+
+        File-based plugins (`dfs`, `s3`) do not register their contents in
+        INFORMATION_SCHEMA, so `tables` and `columns` must branch on this.
+        """
+        result = self.query(
+            "SELECT SCHEMA_NAME, TYPE FROM INFORMATION_SCHEMA.`SCHEMATA` "
+            f"WHERE SCHEMA_NAME = {quote_literal_path(schema)}",
+            max_rows=1,
+        )
+        return result.rows[0].get("TYPE") if result.rows else None
+
     def tables(self, schema: str) -> list[dict[str, Any]]:
+        # File plugins are absent from INFORMATION_SCHEMA.`TABLES`; querying it
+        # for `dfs.tmp` returns an empty list that looks like an empty workspace.
+        # `SHOW FILES` is the only way to enumerate them. sqlalchemy-drill's
+        # get_table_names branches the same way.
+        if self.plugin_type(schema) == "file":
+            result = self.query(
+                f"SHOW FILES FROM {quote_identifier_path(schema)}", max_rows=10_000
+            )
+            tables: list[dict[str, Any]] = []
+            for row in result.rows:
+                name = row.get("name")
+                if not name:
+                    continue
+                # Drill stores a view as a `<name>.view.drill` file in the workspace.
+                if name.endswith(".view.drill"):
+                    tables.append({"name": name[: -len(".view.drill")], "type": "VIEW"})
+                else:
+                    is_dir = str(row.get("isDirectory", "")).lower() == "true"
+                    tables.append({"name": name, "type": "DIRECTORY" if is_dir else "TABLE"})
+            return sorted(tables, key=lambda t: t["name"])
+
         result = self.query(
             "SELECT TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.`TABLES` "
             f"WHERE TABLE_SCHEMA = {quote_literal_path(schema)} ORDER BY TABLE_NAME",
@@ -1505,8 +1656,26 @@ Append these methods to `RestClient`:
         ]
 
     def columns(self, schema: str, table: str) -> list[dict[str, Any]]:
+        # Same split: file plugins have dynamic schemas and no
+        # INFORMATION_SCHEMA.`COLUMNS` rows. DESCRIBE is metadata-only —
+        # deliberately NOT a `SELECT * ... LIMIT 1` probe, which would read user
+        # data to answer a metadata question.
+        if self.plugin_type(schema) == "file":
+            result = self.query(
+                f"DESCRIBE {quote_identifier_path(schema + '.' + table)}",
+                max_rows=10_000,
+            )
+            return [
+                {
+                    "name": row.get("COLUMN_NAME"),
+                    "data_type": row.get("DATA_TYPE"),
+                    "nullable": str(row.get("IS_NULLABLE", "")).upper() == "YES",
+                }
+                for row in result.rows
+            ]
+
         result = self.query(
-            "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS "
+            "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM INFORMATION_SCHEMA.`COLUMNS` "
             f"WHERE TABLE_SCHEMA = {quote_literal_path(schema)} "
             f"AND TABLE_NAME = {quote_literal(table)} ORDER BY ORDINAL_POSITION",
             max_rows=10_000,
@@ -1551,8 +1720,23 @@ Append these methods to `RestClient`:
         return self._request("GET", f"/profiles/cancel/{query_id}").text
 ```
 
-`quote_literal` and `quote_literal_path` already exist from Task 5; this task
-only adds the query-id validator and the methods above.
+`quote_literal` and `quote_literal_path` already exist from Task 5. This task
+adds the query-id validator, the methods above, and one more quoting helper —
+`SHOW FILES FROM` and `DESCRIBE` take *identifiers*, not string literals, so
+they need backtick quoting rather than `'...'`:
+
+```python
+def quote_identifier_path(value: str) -> str:
+    """Validate a dotted path and return it backtick-quoted: dfs.tmp -> `dfs`.`tmp`.
+
+    Same trust boundary as quote_literal_path — these values arrive from the
+    model and are interpolated into SQL. Reject rather than escape.
+    """
+    parts = value.split(".")
+    if any(not _IDENTIFIER.fullmatch(part) for part in parts):
+        raise DrillError(f"invalid identifier: {value!r}")
+    return ".".join(f"`{part}`" for part in parts)
+```
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
