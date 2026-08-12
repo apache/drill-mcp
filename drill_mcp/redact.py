@@ -39,6 +39,32 @@ _SENSITIVE = re.compile(
     re.IGNORECASE,
 )
 
+# The key-based check above only catches secrets that live at a sensitive
+# *key*. A storage-plugin config routinely carries secrets embedded inside an
+# ordinary-looking *value* instead -- a JDBC/S3-style URL with userinfo
+# (`s3a://AKIA:secret@bucket`), or a connection string with a `password=`/
+# `secret=`/`token=` query parameter. Both shapes are real Drill storage
+# plugin configs, so string values are scrubbed too, not just keys.
+#
+# Matches "scheme://user:pass@" and keeps everything else (scheme, host,
+# path) intact -- only the credential pair between "//" and "@" is replaced.
+_URL_USERINFO = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]+:[^/@\s]*@")
+
+# Matches a `?key=value` or `&key=value` query parameter whose key looks like
+# a secret, and replaces only the value -- the `?`/`&` and key name are kept
+# so the rest of the string still parses as the same shape of URL.
+_QUERY_SECRET = re.compile(
+    r"(?P<prefix>[?&](?:password|secret|api_?key|token)=)[^&]*",
+    re.IGNORECASE,
+)
+
+
+def _scrub_value(value: str) -> str:
+    """Strip credentials embedded inside a string value, not just its key."""
+    value = _URL_USERINFO.sub(lambda m: f"{m.group('scheme')}{REDACTED}@", value)
+    value = _QUERY_SECRET.sub(lambda m: f"{m.group('prefix')}{REDACTED}", value)
+    return value
+
 
 def redact(value: Any) -> Any:
     """Return a copy of `value` with sensitive-looking values replaced."""
@@ -51,4 +77,6 @@ def redact(value: Any) -> Any:
         return [redact(item) for item in value]
     if isinstance(value, tuple):
         return tuple(redact(item) for item in value)
+    if isinstance(value, str):
+        return _scrub_value(value)
     return value

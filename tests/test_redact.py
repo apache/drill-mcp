@@ -48,6 +48,27 @@ def test_leaves_innocuous_keys_alone():
     }
 
 
+def test_redacts_userinfo_embedded_in_a_url_shaped_value():
+    # A secret can live inside an ordinary-looking value, not just behind a
+    # sensitive key -- e.g. a `connection` string embedding S3 credentials as
+    # userinfo. This used to survive untouched (the bug this test replaces
+    # `test_leaves_innocuous_keys_alone`'s old assertion for): the key-based
+    # check alone let `redact({"connection": "s3a://AKIA:secret@bucket"})`
+    # pass the secret straight through.
+    source = {"connection": "s3a://AKIA:supersecret@bucket"}
+    result = redact(source)
+    assert "supersecret" not in result["connection"]
+    assert "AKIA" not in result["connection"]
+    assert result["connection"] == "s3a://***REDACTED***@bucket"
+
+
+def test_redacts_password_query_parameter_embedded_in_a_url_shaped_value():
+    source = {"url": "jdbc:mysql://host/db?user=root&password=hunter2"}
+    result = redact(source)
+    assert "hunter2" not in result["url"]
+    assert result["url"] == "jdbc:mysql://host/db?user=root&password=***REDACTED***"
+
+
 def test_recurses_into_nested_dicts():
     source = {"config": {"aws": {"awsSecretAccessKey": "s"}}}
     assert redact(source)["config"]["aws"]["awsSecretAccessKey"] == REDACTED
