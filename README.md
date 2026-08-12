@@ -32,11 +32,14 @@ Register it with an MCP client:
 ```
 
 `drill-mcp --help` lists every flag; `drill.example.yaml` documents every
-config key. CLI flags override the config file, which overrides the
-`DRILL_*` environment variables, which override the built-in defaults.
+config key. CLI flags override the `DRILL_*` environment variables, which
+override the config file, which overrides the built-in defaults.
 Credentials (`user`/`password`) are read from the config file or from
 `DRILL_USER`/`DRILL_PASSWORD` only -- there is no `--user`/`--password` flag,
-and no tool accepts a credential as an argument.
+and no tool accepts a credential as an argument. Because the environment
+wins over the config file, a stale exported `DRILL_PASSWORD` will silently
+override a `password:` set in the config file -- `unset` it if you intend
+the file to be authoritative.
 
 ## Tools
 
@@ -45,7 +48,7 @@ and no tool accepts a credential as an argument.
 | `run_query` | Run one SQL statement |
 | `list_schemas` | List visible schemas |
 | `list_tables` | List tables in a schema |
-| `describe_table` | Column names and types |
+| `describe_table` | Column names, types, and nullability where the plugin reports it |
 | `list_storage_plugins` | Plugin configs, secrets redacted |
 | `cluster_status` | Drillbit membership and status |
 | `list_profiles` | Recent and running queries |
@@ -116,12 +119,19 @@ registers its schema:
 
 - For plugins with a schema registered ahead of time (most JDBC-style and
   relational-style plugins), `describe_table` uses Drill's `DESCRIBE`, which
-  is metadata-only and never reads user data.
+  is metadata-only and never reads user data, and reports nullability for
+  each column.
 - For plugins whose schema is only known at read time (`file`, `mongo`,
   `splunk`), `DESCRIBE` cannot answer, so `describe_table` probes with
   `SELECT ... LIMIT 1` against the target instead. It returns **only column
   names and types** -- the sampled row itself is never included in the
-  result.
+  result, and never has been: this remains true regardless of how any given
+  probe query fails. Nullability is not derivable from a single sampled row,
+  so it is reported as `None` on this path rather than guessed. A probe
+  failure (missing table, permissions, a genuine data error) surfaces
+  Drill's error text unchanged, exactly like the `DESCRIBE` path -- Drill's
+  errors do not embed cell content, so there is nothing for this path to
+  suppress.
 - **HTTP plugins cannot report columns until a query has been run** against
   the endpoint; Drill has no schema for an HTTP source ahead of a real
   request. `describe_table` says this explicitly in its error rather than
@@ -156,5 +166,4 @@ See `drill.example.yaml` for the full configuration reference.
 ```bash
 pip install -e ".[dev]"
 pytest                       # unit tests, no cluster or JVM needed
-pytest -m integration        # requires a live Drill at DRILL_URL
 ```

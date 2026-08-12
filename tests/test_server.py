@@ -21,9 +21,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from drill_mcp.client_rest import DrillError, QueryResult
+from drill_mcp.client_jdbc import JdbcClient
+from drill_mcp.client_rest import DrillError, QueryResult, RestClient
 from drill_mcp.config import load_config
-from drill_mcp.server import DrillTools, ToolError
+from drill_mcp.server import DrillTools, ToolError, build_client, build_server
 
 
 def make_tools(client=None, **overrides):
@@ -535,11 +536,6 @@ class TestShowFiltering:
         result = make_tools(client, hidden_schemas=["sys"]).run_query(sql)
         assert {"SCHEMA_NAME": "sys"} not in result["rows"]
         assert result["rows"] == [{"SCHEMA_NAME": "dfs.tmp"}]
-
-
-from drill_mcp.client_jdbc import JdbcClient
-from drill_mcp.client_rest import RestClient
-from drill_mcp.server import build_client, build_server
 
 
 class TestWiring:

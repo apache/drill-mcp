@@ -32,13 +32,19 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mcp.server.mcpserver import MCPServer
 
 from .client_rest import DrillError, RestClient
 from .config import Config, ConfigError, load_config
 from .guard import Policy, PolicyError, check, is_show_command, matches_prefix
+
+if TYPE_CHECKING:
+    # Imported only for the type checker: build_client's lazy, in-function
+    # import of JdbcClient (see below) is what keeps jaydebeapi/JPype1 out
+    # of the import graph for the REST-only, JVM-free default install.
+    from .client_jdbc import JdbcClient
 
 
 class ToolError(Exception):
@@ -217,7 +223,7 @@ class DrillTools:
             raise ToolError(str(exc)) from exc
 
 
-def build_client(config: Config) -> Any:
+def build_client(config: Config) -> RestClient | JdbcClient:
     """Construct the wire client the configured backend calls for."""
     if config.backend == "jdbc":
         from .client_jdbc import JdbcClient
