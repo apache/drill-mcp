@@ -29,10 +29,17 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 dependencies = [
-    "mcp>=1.2.0",
+    # 2.0 renamed FastMCP to MCPServer and moved it to mcp.server.mcpserver;
+    # the mcp.server.fastmcp module path this code would need on 1.x does
+    # not exist there. No upper cap: a future 3.x doing the same rename
+    # again should fail loudly at import with a clear traceback rather than
+    # have this package pre-emptively block every install in the meantime.
+    "mcp>=2.0",
     "httpx>=0.27",
     "sqlglot>=25.0",
-    "pydantic>=2.6",
+    # mcp itself requires pydantic>=2.12.0 transitively, so 2.6 was never a
+    # reachable floor in practice; stated here to match the real minimum.
+    "pydantic>=2.12",
     "PyYAML>=6.0",
 ]
 
