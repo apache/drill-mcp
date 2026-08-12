@@ -1759,8 +1759,31 @@ git commit -m "feat: metadata and management endpoints on the REST client"
 - Test: `tests/test_client_jdbc.py`
 
 **Interfaces:**
-- Consumes: `config.Config`, `client_rest.QueryResult`, `client_rest.DrillError`, `client_rest.quote_literal`, `client_rest.quote_literal_path`
-- Produces: `drill_mcp.client_jdbc.JdbcClient(config: Config)` with `query`, `schemas`, `tables`, `columns`, `close` — the same signatures as `RestClient`. Management methods are **not** implemented.
+- Consumes: `config.Config`, `client_rest.QueryResult`, `client_rest.DrillError`
+- Produces: `drill_mcp.client_jdbc.JdbcClient(config: Config)` with `query`, `plugin_type`, `schemas`, `tables`, `columns`, `close` — the same signatures as `RestClient`. Management methods are **not** implemented.
+- Also produces, by extraction in `client_rest.py`:
+  - `fetch_plugin_type(query, schema) -> str | None`
+  - `fetch_schemas(query) -> list[dict]`
+  - `fetch_tables(query, schema) -> list[dict]`
+  - `fetch_columns(query, schema, table) -> list[dict]`
+
+  where `query` is any callable `(sql: str, max_rows: int) -> QueryResult`.
+
+**This task starts with a refactor, then adds the JDBC client.** Task 6 implemented
+the metadata methods directly on `RestClient`. They are pure SQL-building plus
+row-mapping over `query()` — including the file-plugin branching — and the JDBC
+client needs exactly the same behavior. Duplicating ~80 lines of security-relevant
+identifier quoting and plugin-type branching into a second class would be a defect,
+not a convenience.
+
+So: first extract Task 6's `plugin_type`/`schemas`/`tables`/`columns` bodies into
+module-level `fetch_*` functions in `client_rest.py` that take a query callable,
+and reduce `RestClient`'s methods to one-line delegations. Task 6's existing tests
+must keep passing **unchanged** — that is the proof the extraction is behavior-
+preserving. Only then add `JdbcClient`, delegating to the same functions.
+
+The second consumer is what justifies the abstraction; extracting before it existed
+would have been speculative.
 
 **Note for the implementer:** this task never imports a real JVM. `jaydebeapi` is mocked in tests via `monkeypatch.setitem(sys.modules, ...)`, so the suite runs without the `jdbc` extra installed.
 
@@ -1969,42 +1992,23 @@ class JdbcClient:
 
     # -- metadata ----------------------------------------------------------
 
+    # Metadata is identical for both backends: it is plain SQL over a `query`
+    # callable, including the file-plugin branching. Rather than duplicate it,
+    # Task 6's implementations are extracted into module-level functions in
+    # `client_rest.py` that take a query callable, and both clients delegate.
+    # This is the moment to extract — the second consumer is what justifies it.
+
+    def plugin_type(self, schema: str) -> str | None:
+        return fetch_plugin_type(self.query, schema)
+
     def schemas(self) -> list[dict[str, Any]]:
-        result = self.query(
-            "SELECT SCHEMA_NAME, TYPE FROM INFORMATION_SCHEMA.SCHEMATA ORDER BY SCHEMA_NAME",
-            max_rows=10_000,
-        )
-        return [
-            {"name": row.get("SCHEMA_NAME"), "type": row.get("TYPE")}
-            for row in result.rows
-        ]
+        return fetch_schemas(self.query)
 
     def tables(self, schema: str) -> list[dict[str, Any]]:
-        result = self.query(
-            "SELECT TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.`TABLES` "
-            f"WHERE TABLE_SCHEMA = {quote_literal_path(schema)} ORDER BY TABLE_NAME",
-            max_rows=10_000,
-        )
-        return [
-            {"name": row.get("TABLE_NAME"), "type": row.get("TABLE_TYPE")}
-            for row in result.rows
-        ]
+        return fetch_tables(self.query, schema)
 
     def columns(self, schema: str, table: str) -> list[dict[str, Any]]:
-        result = self.query(
-            "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS "
-            f"WHERE TABLE_SCHEMA = {quote_literal_path(schema)} "
-            f"AND TABLE_NAME = {quote_literal(table)} ORDER BY ORDINAL_POSITION",
-            max_rows=10_000,
-        )
-        return [
-            {
-                "name": row.get("COLUMN_NAME"),
-                "data_type": row.get("DATA_TYPE"),
-                "nullable": str(row.get("IS_NULLABLE", "")).upper() == "YES",
-            }
-            for row in result.rows
-        ]
+        return fetch_columns(self.query, schema, table)
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
