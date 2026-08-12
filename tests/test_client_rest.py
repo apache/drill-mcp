@@ -24,7 +24,14 @@ import httpx
 import pytest
 import respx
 
-from drill_mcp.client_rest import DrillError, RestClient, quote_literal, quote_literal_path
+from drill_mcp.client_rest import (
+    DrillError,
+    RestClient,
+    quote_identifier,
+    quote_identifier_path,
+    quote_literal,
+    quote_literal_path,
+)
 from drill_mcp.config import load_config
 
 BASE = "http://drill:8047"
@@ -82,6 +89,22 @@ class TestQuoting:
     def test_literal_path_rejects_dangerous_input(self, bad):
         with pytest.raises(DrillError, match="invalid identifier"):
             quote_literal_path(bad)
+
+    def test_identifier_path_rejects_a_backtick(self):
+        with pytest.raises(DrillError, match="invalid identifier"):
+            quote_identifier_path("dfs`x")
+
+    def test_identifier_rejects_a_backtick(self):
+        with pytest.raises(DrillError, match="invalid identifier"):
+            quote_identifier("a`b")
+
+    def test_identifier_rejects_a_bare_dot_dot_segment(self):
+        with pytest.raises(DrillError, match="invalid identifier"):
+            quote_identifier("..")
+
+    def test_identifier_rejects_a_dot_dot_segment_within_a_longer_name(self):
+        with pytest.raises(DrillError, match="invalid identifier"):
+            quote_identifier("foo...bar")
 
 
 class TestQuery:
@@ -420,6 +443,16 @@ class TestMetadata:
         with pytest.raises(DrillError, match="invalid identifier"):
             make_client().tables("dfs'; DROP TABLE x --")
 
+    @respx.mock
+    def test_plugin_type_returns_the_schema_type(self):
+        route = respx.post(f"{BASE}/query.json").mock(
+            return_value=query_response(
+                ["SCHEMA_NAME", "TYPE"], [{"SCHEMA_NAME": "dfs.tmp", "TYPE": "file"}]
+            )
+        )
+        assert make_client().plugin_type("dfs.tmp") == "file"
+        assert b"'dfs.tmp'" in route.calls.last.request.read()
+
 
 class TestFilePluginMetadata:
     """File plugins are absent from INFORMATION_SCHEMA; they need SHOW FILES."""
@@ -527,10 +560,19 @@ class TestFilePluginMetadata:
         assert b"`README`" in route.calls[1].request.read()
 
     @respx.mock
-    def test_columns_rejects_a_backtick_in_the_table_name(self):
+    def test_columns_table_name_guard_rejects_a_backtick_before_any_query_fires(self):
+        # The `_FILE_IDENTIFIER` guard in `fetch_columns` catches this before
+        # `plugin_type` (and thus `quote_identifier_path`) is ever reached.
         route = respx.post(f"{BASE}/query.json").mock(return_value=self._schemata("file"))
         with pytest.raises(DrillError, match="invalid identifier"):
             make_client().columns("dfs.tmp", "sales`; DROP TABLE x --.csv")
+        assert not route.called
+
+    @respx.mock
+    def test_columns_rejects_a_bare_dot_dot_table_name(self):
+        route = respx.post(f"{BASE}/query.json").mock(return_value=self._schemata("file"))
+        with pytest.raises(DrillError, match="invalid identifier"):
+            make_client().columns("dfs.tmp", "..")
         assert not route.called
 
     @respx.mock
@@ -559,7 +601,9 @@ class TestFilePluginMetadata:
         assert make_client().tables("nope") == []
 
     @respx.mock
-    def test_show_files_path_still_rejects_injection(self):
+    def test_tables_schema_name_is_rejected_before_the_plugin_type_lookup(self):
+        # `plugin_type`'s own `quote_literal_path` call rejects this before
+        # `quote_identifier_path` (the SHOW FILES path) is ever reached.
         respx.post(f"{BASE}/query.json").mock(return_value=self._schemata("file"))
         with pytest.raises(DrillError, match="invalid identifier"):
             make_client().tables("dfs`; DROP TABLE x --")
@@ -587,6 +631,16 @@ class TestManagement:
         plugins = make_client().storage_plugins()
         assert plugins[0]["config"]["fs.s3a.secret.key"] == "***REDACTED***"
         assert plugins[0]["name"] == "s3"
+
+    @respx.mock
+    def test_storage_plugins_non_json_response_is_a_drill_error(self):
+        # A 200 response carrying HTML -- the auth-proxy scenario `_login`
+        # exists to handle -- must not raise a raw JSONDecodeError.
+        respx.get(f"{BASE}/storage.json").mock(
+            return_value=httpx.Response(200, text="<html>not json</html>")
+        )
+        with pytest.raises(DrillError, match="non-JSON response"):
+            make_client().storage_plugins()
 
     @respx.mock
     def test_cluster_status_merges_cluster_and_status(self):
@@ -627,6 +681,31 @@ class TestManagement:
         assert make_client().profiles(limit=5)[0]["queryId"] == "live"
 
     @respx.mock
+    def test_profiles_tolerates_a_non_dict_payload(self):
+        respx.get(f"{BASE}/profiles.json").mock(
+            return_value=httpx.Response(200, json=["unexpected", "list", "payload"])
+        )
+        assert make_client().profiles(limit=5) == []
+
+    @respx.mock
+    def test_profiles_clamps_a_negative_limit_to_zero(self):
+        respx.get(f"{BASE}/profiles.json").mock(
+            return_value=httpx.Response(
+                200,
+                json={"runningQueries": [{"queryId": "live"}], "finishedQueries": []},
+            )
+        )
+        assert make_client().profiles(limit=-5) == []
+
+    @respx.mock
+    def test_profiles_non_json_response_is_a_drill_error(self):
+        respx.get(f"{BASE}/profiles.json").mock(
+            return_value=httpx.Response(200, text="<html>not json</html>")
+        )
+        with pytest.raises(DrillError, match="non-JSON response"):
+            make_client().profiles(limit=5)
+
+    @respx.mock
     def test_profile_fetches_one_query(self):
         respx.get(f"{BASE}/profiles/abc.json").mock(
             return_value=httpx.Response(200, json={"queryId": "abc", "state": "COMPLETED"})
@@ -637,6 +716,14 @@ class TestManagement:
     def test_profile_rejects_a_malformed_query_id(self):
         with pytest.raises(DrillError, match="invalid"):
             make_client().profile("../../etc/passwd")
+
+    @respx.mock
+    def test_profile_non_json_response_is_a_drill_error(self):
+        respx.get(f"{BASE}/profiles/abc.json").mock(
+            return_value=httpx.Response(200, text="<html>not json</html>")
+        )
+        with pytest.raises(DrillError, match="non-JSON response"):
+            make_client().profile("abc")
 
     @respx.mock
     def test_cancel_query(self):

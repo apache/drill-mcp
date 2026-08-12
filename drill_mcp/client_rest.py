@@ -47,7 +47,7 @@ from .redact import redact
 # empty string never matches, and `quote_literal_path` splits on "." and
 # validates every segment, so a lone "." (which splits into two empty
 # segments) is rejected too.
-_IDENTIFIER = re.compile(r"^[A-Za-z0-9_$-]+$")
+_IDENTIFIER = re.compile(r"[A-Za-z0-9_$-]+")
 
 # Drill's j_security_check returns HTTP 200 even on a wrong password; the only
 # signal is this marker string inside the HTML error page body. Matched
@@ -135,6 +135,20 @@ def quote_identifier_path(value: str) -> str:
 _FILE_IDENTIFIER = re.compile(r"[A-Za-z0-9_$.-]+")
 
 
+def _is_valid_file_identifier(value: str) -> bool:
+    """`_FILE_IDENTIFIER` plus a check that no "." segment is empty or "..".
+
+    `_FILE_IDENTIFIER` alone permits a bare ".." (or a leading/trailing/
+    doubled dot), which Drill treats as a directory reference -- e.g.
+    `columns("dfs.tmp", "..")` would otherwise reach the workspace's parent.
+    "/" is excluded from the character class, so this can never traverse more
+    than one level or reach a specific file, but it should still be rejected.
+    """
+    if not _FILE_IDENTIFIER.fullmatch(value):
+        return False
+    return all(part not in ("", "..") for part in value.split("."))
+
+
 def quote_identifier(value: str) -> str:
     """Quote a single identifier that may itself contain dots, e.g. a filename.
 
@@ -145,7 +159,7 @@ def quote_identifier(value: str) -> str:
     quotes plugin.`workspace`.`file.ext` the same way). Reject rather than
     escape -- same trust boundary as `quote_identifier_path`.
     """
-    if not _FILE_IDENTIFIER.fullmatch(value):
+    if not _is_valid_file_identifier(value):
         raise DrillError(f"invalid identifier: {value!r}")
     return f"`{value}`"
 
@@ -157,6 +171,19 @@ def _check_query_id(query_id: str) -> str:
     if not _QUERY_ID.fullmatch(query_id):
         raise DrillError(f"invalid query id: {query_id!r}")
     return query_id
+
+
+def _json(response: httpx.Response, url: str) -> Any:
+    """Decode a response body as JSON, converting a decode failure to `DrillError`.
+
+    A 200 response carrying HTML -- exactly the auth-proxy scenario `_login`
+    exists to handle -- must never raise a raw `json.JSONDecodeError` out of
+    the client boundary.
+    """
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise DrillError(f"Drill at {url} returned a non-JSON response") from exc
 
 
 def _error_text(response: httpx.Response) -> str:
@@ -250,7 +277,7 @@ def fetch_columns(query: Query, schema: str, table: str) -> list[dict[str, Any]]
     # `_FILE_IDENTIFIER` (not `_IDENTIFIER`) because file-plugin table
     # names are filenames and may contain a literal "." (e.g. "sales.csv")
     # as ONE identifier -- see `quote_identifier`.
-    if not _FILE_IDENTIFIER.fullmatch(table):
+    if not _is_valid_file_identifier(table):
         raise DrillError(f"invalid identifier: {table!r}")
 
     # Same split: file plugins have dynamic schemas and no
@@ -391,12 +418,7 @@ class RestClient:
             "/query.json",
             json={"queryType": "SQL", "query": sql, "autoLimit": max_rows},
         )
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise DrillError(
-                f"Drill at {self._config.url} returned a non-JSON response"
-            ) from exc
+        payload = _json(response, self._config.url)
         rows = payload.get("rows") or []
         return QueryResult(
             columns=payload.get("columns") or [],
@@ -427,12 +449,12 @@ class RestClient:
     # -- management --------------------------------------------------------
 
     def storage_plugins(self) -> list[dict[str, Any]]:
-        payload = self._request("GET", "/storage.json").json()
-        return redact(payload)
+        response = self._request("GET", "/storage.json")
+        return redact(_json(response, self._config.url))
 
     def cluster_status(self) -> dict[str, Any]:
-        cluster = self._request("GET", "/cluster.json").json()
-        status = self._request("GET", "/status.json").json()
+        cluster = _json(self._request("GET", "/cluster.json"), self._config.url)
+        status = _json(self._request("GET", "/status.json"), self._config.url)
         merged = dict(cluster) if isinstance(cluster, dict) else {"cluster": cluster}
         if isinstance(status, dict):
             merged.update(status)
@@ -441,14 +463,19 @@ class RestClient:
         return merged
 
     def profiles(self, limit: int) -> list[dict[str, Any]]:
-        payload = self._request("GET", "/profiles.json").json()
+        limit = max(limit, 0)
+        response = self._request("GET", "/profiles.json")
+        payload = _json(response, self._config.url)
+        if not isinstance(payload, dict):
+            payload = {}
         running = payload.get("runningQueries") or []
         finished = payload.get("finishedQueries") or []
         return (list(running) + list(finished))[:limit]
 
     def profile(self, query_id: str) -> dict[str, Any]:
         _check_query_id(query_id)
-        return self._request("GET", f"/profiles/{query_id}.json").json()
+        response = self._request("GET", f"/profiles/{query_id}.json")
+        return _json(response, self._config.url)
 
     def cancel_query(self, query_id: str) -> str:
         _check_query_id(query_id)
