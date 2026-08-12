@@ -2839,7 +2839,6 @@ Run before declaring the plan complete:
 - Consumes: everything from Tasks 5-7
 - Produces:
   - `QueryResult` gains `metadata: list[str]` — Drill's per-column type strings
-  - `fetch_view_names(query, schema) -> list[str]`
   - `DYNAMIC_SCHEMA_TYPES = ("file", "mongo", "splunk")`
 
 **Why:** `DESCRIBE` cannot answer for a plugin whose schema is discovered at read
@@ -2899,10 +2898,11 @@ def fetch_columns(query, schema, table):
   "nullable": None}` — a probe cannot determine nullability, and guessing is worse
   than reporting unknown
 
-`fetch_view_names` issues
-``SELECT `TABLE_NAME` FROM INFORMATION_SCHEMA.`VIEWS` WHERE TABLE_SCHEMA = '<schema>'``
-and returns `[]` on error, matching the dialect's tolerance — a missing views
-table must not break column lookup.
+No view lookup is needed. The dialect's view branch exists only to work around
+its own `format_drill_table`, which assumes the trailing dotted token is a file
+extension and so splits `a.b` into `` a.`b` ``. `quote_identifier_path` plus
+`quote_identifier` do not have that bug, so the view and file forms are already
+identical — which saves a query per probe.
 
 - [ ] **Step 4: `fetch_plugin_type` resolves a bare plugin name**
 
@@ -2915,11 +2915,9 @@ then the first row whose name's leading dotted component matches. Do **not** use
 - [ ] **Step 5: Tests**
 
 Cover: `metadata` captured and precision stripped; each of the three dynamic
-types emitting the right probe SQL; mongo using `` `**` ``; a view taking the view
-branch; a plain file taking the file branch; a non-dynamic type still using
+types emitting the right probe SQL; mongo using `` `**` ``; a plain file taking the file branch; a non-dynamic type still using
 `DESCRIBE`; `http` raising with a message naming the schema and suggesting a
-query; bare `dfs` resolving via prefix; `fetch_view_names` returning `[]` when the
-query fails; **and that no sampled row value appears anywhere in `describe_table`'s
+query; bare `dfs` resolving via prefix; **and that no sampled row value appears anywhere in `describe_table`'s
 output.** Injection tests still apply to every new interpolation site.
 
 - [ ] **Step 6: Commit**
