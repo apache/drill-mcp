@@ -580,11 +580,18 @@ class RestClient:
         )
         payload = _json(response, _safe_url(self._config.url))
         rows = payload.get("rows") or []
+        truncated = max_rows > 0 and len(rows) >= max_rows
+        # Defense in depth: `autoLimit` asks Drill to cap rows server-side,
+        # but the cap must not depend entirely on Drill honoring that field.
+        # Slice client-side too, exactly like `JdbcClient.query`'s
+        # `fetchmany(max_rows)` -- the two backends must agree on this.
+        if max_rows > 0:
+            rows = rows[:max_rows]
         return QueryResult(
             columns=payload.get("columns") or [],
             rows=rows,
             query_id=payload.get("queryId"),
-            truncated=max_rows > 0 and len(rows) >= max_rows,
+            truncated=truncated,
             metadata=payload.get("metadata") or [],
         )
 

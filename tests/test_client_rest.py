@@ -135,6 +135,24 @@ class TestQuery:
         assert make_client().query("SELECT 1", max_rows=2).truncated is True
 
     @respx.mock
+    def test_slices_rows_to_max_rows_even_if_drill_ignores_autolimit(self):
+        # `autoLimit` asks Drill to cap rows server-side, but the cap must
+        # not depend entirely on Drill honoring that field. Simulate Drill
+        # returning more rows than requested (e.g. an older Drill version, or
+        # autoLimit simply not being respected) and confirm the client still
+        # enforces the cap itself -- exactly like JdbcClient.query's
+        # fetchmany(max_rows).
+        respx.post(f"{BASE}/query.json").mock(
+            return_value=httpx.Response(
+                200,
+                json={"columns": ["a"], "rows": [{"a": str(i)} for i in range(10)]},
+            )
+        )
+        result = make_client().query("SELECT 1", max_rows=2)
+        assert len(result.rows) == 2
+        assert result.truncated is True
+
+    @respx.mock
     def test_not_truncated_when_max_rows_is_zero(self):
         # 0 >= 0 would be a false "truncated" without the max_rows > 0 guard.
         respx.post(f"{BASE}/query.json").mock(
