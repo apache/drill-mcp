@@ -173,6 +173,27 @@ class TestQuery:
         assert "s3cret" not in str(exc.value)
 
     @respx.mock
+    def test_connection_failure_message_drops_a_password_embedded_in_the_url(self):
+        # Mirrors client_jdbc.py's
+        # test_jdbc_url_drops_userinfo_from_a_url_that_embeds_credentials --
+        # the REST backend must apply the same defense. config.url is
+        # free-form and unvalidated, so nothing stops
+        # DRILL_URL=http://alice:s3cret@drill:8047; every message that
+        # echoes config.url back to the model must not leak the password
+        # embedded there.
+        url = "http://alice:s3cret@drill:8047"
+        respx.post(f"{url}/j_security_check").mock(side_effect=httpx.ConnectError("refused"))
+        respx.post(f"{url}/query.json").mock(side_effect=httpx.ConnectError("refused"))
+        with pytest.raises(DrillError) as exc:
+            make_client(url=url, auth="basic", user="alice", password="s3cret").query(
+                "SELECT 1", max_rows=1
+            )
+        message = str(exc.value)
+        assert "s3cret" not in message
+        assert "alice" not in message
+        assert "drill:8047" in message
+
+    @respx.mock
     def test_timeout_is_reported_clearly(self):
         respx.post(f"{BASE}/query.json").mock(side_effect=httpx.ReadTimeout("slow"))
         with pytest.raises(DrillError, match="timed out"):

@@ -31,6 +31,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 
@@ -178,6 +179,22 @@ def _check_query_id(query_id: str) -> str:
     if not _QUERY_ID.fullmatch(query_id):
         raise DrillError(f"invalid query id: {query_id!r}")
     return query_id
+
+
+def _safe_url(url: str) -> str:
+    """Return `url` with any embedded userinfo (e.g. a password) stripped.
+
+    `config.url` is free-form and unvalidated, so nothing stops a value like
+    `http://alice:s3cret@drill:8047`. Every message that echoes the URL back
+    to the model must use this instead of the raw config value -- the
+    `client_jdbc.py` backend already applies this exact defense to its
+    connection string; the REST backend must not diverge.
+    """
+    parsed = urlparse(url)
+    if not parsed.hostname:
+        return url
+    netloc = parsed.hostname if parsed.port is None else f"{parsed.hostname}:{parsed.port}"
+    return urlunparse(parsed._replace(netloc=netloc))
 
 
 def _json(response: httpx.Response, url: str) -> Any:
@@ -512,23 +529,23 @@ class RestClient:
         # "/j_security_check", so that check false-positives on success.)
         if response.status_code >= 400:
             raise DrillError(
-                f"authentication endpoint at {self._config.url} returned "
+                f"authentication endpoint at {_safe_url(self._config.url)} returned "
                 f"HTTP {response.status_code}"
             )
         if _contains_invalid_credentials_marker(response.text):
             raise DrillError(
-                f"authentication failed for user {self._config.user!r} at {self._config.url}"
+                f"authentication failed for user {self._config.user!r} at {_safe_url(self._config.url)}"
             )
         self._authenticated = True
 
     def _transport_error(self, exc: httpx.HTTPError) -> DrillError:
         if isinstance(exc, httpx.TimeoutException):
             return DrillError(
-                f"request to {self._config.url} timed out after "
+                f"request to {_safe_url(self._config.url)} timed out after "
                 f"{self._config.timeout_seconds}s"
             )
         return DrillError(
-            f"could not reach Drill at {self._config.url} "
+            f"could not reach Drill at {_safe_url(self._config.url)} "
             f"(auth mode: {self._config.auth}): {type(exc).__name__}"
         )
 
@@ -546,7 +563,7 @@ class RestClient:
 
         if response.status_code == 401:
             raise DrillError(
-                f"authentication rejected by Drill at {self._config.url} "
+                f"authentication rejected by Drill at {_safe_url(self._config.url)} "
                 f"for user {self._config.user!r}"
             )
         if response.status_code >= 400:
@@ -561,7 +578,7 @@ class RestClient:
             "/query.json",
             json={"queryType": "SQL", "query": sql, "autoLimit": max_rows},
         )
-        payload = _json(response, self._config.url)
+        payload = _json(response, _safe_url(self._config.url))
         rows = payload.get("rows") or []
         return QueryResult(
             columns=payload.get("columns") or [],
@@ -594,11 +611,11 @@ class RestClient:
 
     def storage_plugins(self) -> list[dict[str, Any]]:
         response = self._request("GET", "/storage.json")
-        return redact(_json(response, self._config.url))
+        return redact(_json(response, _safe_url(self._config.url)))
 
     def cluster_status(self) -> dict[str, Any]:
-        cluster = _json(self._request("GET", "/cluster.json"), self._config.url)
-        status = _json(self._request("GET", "/status.json"), self._config.url)
+        cluster = _json(self._request("GET", "/cluster.json"), _safe_url(self._config.url))
+        status = _json(self._request("GET", "/status.json"), _safe_url(self._config.url))
         merged = dict(cluster) if isinstance(cluster, dict) else {"cluster": cluster}
         if isinstance(status, dict):
             merged.update(status)
@@ -609,7 +626,7 @@ class RestClient:
     def profiles(self, limit: int) -> list[dict[str, Any]]:
         limit = max(limit, 0)
         response = self._request("GET", "/profiles.json")
-        payload = _json(response, self._config.url)
+        payload = _json(response, _safe_url(self._config.url))
         if not isinstance(payload, dict):
             payload = {}
         running = payload.get("runningQueries") or []
@@ -619,7 +636,7 @@ class RestClient:
     def profile(self, query_id: str) -> dict[str, Any]:
         _check_query_id(query_id)
         response = self._request("GET", f"/profiles/{query_id}.json")
-        return _json(response, self._config.url)
+        return _json(response, _safe_url(self._config.url))
 
     def cancel_query(self, query_id: str) -> str:
         _check_query_id(query_id)
