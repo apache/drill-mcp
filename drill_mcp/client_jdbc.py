@@ -132,13 +132,24 @@ class JdbcClient:
             with closing(connection.cursor()) as cursor:
                 cursor.execute(sql)
                 rows = cursor.fetchmany(max_rows)
-                columns = [description[0] for description in cursor.description or []]
+                description = cursor.description or []
+                columns = [entry[0] for entry in description]
+                # entry[1] is the DB-API type_code. jaydebeapi's is not a
+                # bare string, so it is stringified the same way the REST
+                # path's `metadata` array is consumed (client_rest.py's
+                # QueryResult.metadata docstring): a per-column type name,
+                # `None` when unknown, never an error.
+                metadata = [
+                    str(entry[1]) if len(entry) > 1 and entry[1] is not None else None
+                    for entry in description
+                ]
         except Exception as exc:
             raise DrillError(self._scrub(str(exc))) from exc
         return QueryResult(
             columns=columns,
             rows=[dict(zip(columns, row)) for row in rows],
             truncated=max_rows > 0 and len(rows) >= max_rows,
+            metadata=metadata,
         )
 
     # -- metadata --------------------------------------------------------------

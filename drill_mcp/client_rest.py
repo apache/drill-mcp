@@ -93,6 +93,11 @@ class QueryResult:
     rows: list[dict[str, Any]] = field(default_factory=list)
     query_id: str | None = None
     truncated: bool = False
+    # Per-column type strings aligned with `columns`, e.g. "VARCHAR(10)".
+    # Drill's REST API returns this in a `metadata` array (Drill >= 1.19);
+    # older Drill omits it. Absent metadata is not an error -- callers that
+    # need types (e.g. `_probe_columns`) must tolerate an empty list here.
+    metadata: list[str] = field(default_factory=list)
 
 
 def quote_literal(value: str) -> str:
@@ -216,19 +221,48 @@ def _error_text(response: httpx.Response) -> str:
 Query = Callable[[str, int], QueryResult]
 
 
+# Plugin types whose schema is discovered at read time rather than registered
+# in INFORMATION_SCHEMA. `DESCRIBE` cannot answer for these -- there is
+# nothing durable to describe -- so `fetch_columns` must probe with a
+# `SELECT ... LIMIT 1` instead. Matches sqlalchemy-drill's `get_columns`
+# (base.py:405-470), which is the methodology this module follows rather
+# than inventing its own.
+DYNAMIC_SCHEMA_TYPES = ("file", "mongo", "splunk")
+
+# Strips size/precision info from a Drill type string, e.g. "VARCHAR(10)" ->
+# "VARCHAR", "DECIMAL(10, 2)" -> "DECIMAL". Same approach drilldbapi's
+# `Cursor.execute` uses on the `metadata` array (sad.py:278).
+_TYPE_PRECISION = re.compile(r"\(.*\)")
+
+
 def fetch_plugin_type(query: Query, schema: str) -> str | None:
     """Return the storage plugin TYPE backing `schema`, or None if unknown.
 
     File-based plugins (`dfs`, `s3`) do not register their contents in
     INFORMATION_SCHEMA, so `fetch_tables` and `fetch_columns` must branch on
     this.
+
+    A *bare* plugin name (`dfs`) has no exact SCHEMATA row of its own --
+    only its workspaces do (`dfs.tmp`, `dfs.root`). SCHEMATA is fetched once,
+    unfiltered, and matched in Python: an exact match wins; otherwise the
+    first row whose name's leading dotted component equals `schema` is used.
+    This is deliberately NOT a `WHERE SCHEMA_NAME LIKE '%schema%'` clause
+    (which is what sqlalchemy-drill's `get_plugin_type` does, base.py:474) --
+    `schema` is model-supplied, and `%`/`_` are wildcards in a LIKE pattern.
     """
+    quote_literal_path(schema)  # validate the identifier before any query fires
     result = query(
-        "SELECT SCHEMA_NAME, TYPE FROM INFORMATION_SCHEMA.`SCHEMATA` "
-        f"WHERE SCHEMA_NAME = {quote_literal_path(schema)}",
-        1,
+        "SELECT SCHEMA_NAME, TYPE FROM INFORMATION_SCHEMA.`SCHEMATA`",
+        10_000,
     )
-    return result.rows[0].get("TYPE") if result.rows else None
+    prefix_match: str | None = None
+    for row in result.rows:
+        name = row.get("SCHEMA_NAME")
+        if name == schema:
+            return row.get("TYPE")
+        if prefix_match is None and name and name.split(".", 1)[0] == schema:
+            prefix_match = row.get("TYPE")
+    return prefix_match
 
 
 def fetch_schemas(query: Query) -> list[dict[str, Any]]:
@@ -274,6 +308,130 @@ def fetch_tables(query: Query, schema: str) -> list[dict[str, Any]]:
     ]
 
 
+def fetch_view_names(query: Query, schema: str) -> list[str]:
+    """Return the names of views registered directly under `schema`.
+
+    sqlalchemy-drill's dialect uses this to pick between two different probe
+    SQL shapes in `get_columns` (base.py:423-428), because its own
+    `format_drill_table` quoting mishandles a view name. `_probe_columns`
+    below has no such failure mode (see its comment), so it does not need
+    this to build a query -- but the lookup itself is still a plugin-neutral
+    piece of Drill metadata worth exposing directly, mirroring the dialect's
+    `get_view_names` (base.py:362-372): a query failure (e.g. a Drill
+    version without the `VIEWS` INFORMATION_SCHEMA relation) is tolerated
+    and yields an empty list rather than raising. An invalid `schema` still
+    raises -- only the query itself is allowed to fail silently.
+    """
+    literal_schema = quote_literal_path(schema)  # raises on an invalid identifier
+    try:
+        result = query(
+            f"SELECT `TABLE_NAME` FROM INFORMATION_SCHEMA.`VIEWS` WHERE TABLE_SCHEMA = {literal_schema}",
+            10_000,
+        )
+    except DrillError:
+        return []
+    return [row["TABLE_NAME"] for row in result.rows if row.get("TABLE_NAME")]
+
+
+def _probe_target(schema: str, table: str) -> str:
+    """Quote `schema`.`table` the same way `_describe_columns` does.
+
+    `schema` is a dotted path (each segment quoted individually via
+    `quote_identifier_path`); `table` stays inside ONE backtick pair via
+    `quote_identifier` because file-plugin table names are filenames that
+    may themselves contain a "." (e.g. "sales.csv") -- see `quote_identifier`.
+
+    sqlalchemy-drill's dialect instead special-cases this by counting dots
+    in `schema + "." + table` to decide where the plugin/workspace/filename
+    boundaries fall (`format_drill_table`, base.py:164-193), and for a view
+    wraps the WHOLE schema string in a single backtick pair instead
+    (base.py:425). Both produce valid SQL, but neither is needed here: this
+    codebase's identifier helpers already quote every schema segment and the
+    table/filename correctly and uniformly, for both a view and a plain
+    file, so the same quoting is reused for both `_probe_columns` branches
+    rather than replicating the dialect's ad hoc dot-counting.
+    """
+    return f"{quote_identifier_path(schema)}.{quote_identifier(table)}"
+
+
+def _columns_from_metadata(columns: list[str], metadata: list[str]) -> list[dict[str, Any]]:
+    """Build `describe_table` rows from a probe's `columns`/`metadata`.
+
+    Never reads `result.rows` -- the caller passes only `columns` and
+    `metadata`, so a sampled row value cannot reach this function let alone
+    its return value. Nullability is unknowable from a single probed row
+    (a `NULL` here says nothing about whether the column CAN be null, and a
+    non-`NULL` value says nothing about whether it must); reporting `None`
+    is honest, guessing `True` or `False` is not.
+    """
+    # `zip` silently truncates to the shorter list; pad rather than let a
+    # metadata array that is present but short (a malformed or unexpected
+    # response) drop trailing columns.
+    types = list(metadata) + [None] * max(0, len(columns) - len(metadata))
+    result = []
+    for name, type_str in zip(columns, types):
+        data_type = _TYPE_PRECISION.sub("", type_str) if type_str else None
+        result.append({"name": name, "data_type": data_type, "nullable": None})
+    return result
+
+
+def _probe_columns(query: Query, schema: str, table: str, plugin_type: str) -> list[dict[str, Any]]:
+    """Discover columns for a dynamic-schema plugin by probing one row.
+
+    `DESCRIBE` cannot answer for `file`/`mongo`/`splunk`: their schema is
+    discovered at read time, not registered anywhere `DESCRIBE` can consult.
+    Mirrors sqlalchemy-drill's `get_columns` (base.py:405-451).
+
+    Privacy: this reads one row from the underlying data, but only
+    `result.columns` and `result.metadata` are used below -- `result.rows`
+    is discarded unread. That is what makes the probe acceptable here: the
+    caller (`describe_table`) gets column names and types, never sampled
+    values.
+    """
+    if plugin_type == "mongo":
+        # Collections carry no dots, so the combined schema.table path is
+        # quoted segment-wise like any other dotted path (base.py:420-422).
+        target = quote_identifier_path(f"{schema}.{table}")
+        sql = f"SELECT `**` FROM {target} LIMIT 1"
+    else:
+        # sqlalchemy-drill's dialect branches here on `table in views`
+        # (base.py:423-428) because its OWN quoting -- `format_drill_table`
+        # counting dots to split plugin/workspace/filename -- mishandles a
+        # view name that doesn't fit that 2-or-3-dot shape, so it falls back
+        # to wrapping the whole schema in one backtick pair for views
+        # instead. `_probe_target` doesn't have that failure mode: it quotes
+        # every schema segment and the table/filename correctly and
+        # uniformly regardless of whether `table` names a view or a file, so
+        # there is no second quoting scheme to fall back to here. A table
+        # that happens to be a registered view is still queried by
+        # `_probe_target`, unchanged.
+        target = _probe_target(schema, table)
+        sql = f"SELECT * FROM {target} LIMIT 1"
+
+    result = query(sql, 1)
+    return _columns_from_metadata(result.columns, result.metadata)
+
+
+def _describe_columns(query: Query, schema: str, table: str) -> list[dict[str, Any]]:
+    """Discover columns via `DESCRIBE`, for any plugin with a registered schema.
+
+    Mirrors sqlalchemy-drill's `get_columns` `else` branch (base.py:453-472):
+    `DESCRIBE` is metadata-only and never reads user data, so it is
+    preferred whenever it can answer -- i.e. for anything NOT in
+    `DYNAMIC_SCHEMA_TYPES`.
+    """
+    target = _probe_target(schema, table)
+    result = query(f"DESCRIBE {target}", 10_000)
+    return [
+        {
+            "name": row.get("COLUMN_NAME"),
+            "data_type": row.get("DATA_TYPE"),
+            "nullable": str(row.get("IS_NULLABLE", "")).upper() == "YES",
+        }
+        for row in result.rows
+    ]
+
+
 def fetch_columns(query: Query, schema: str, table: str) -> list[dict[str, Any]]:
     # Validate the table name up front, before the plugin_type lookup fires
     # a query: an invalid table name should never make it to the network.
@@ -283,40 +441,27 @@ def fetch_columns(query: Query, schema: str, table: str) -> list[dict[str, Any]]
     if not _is_valid_file_identifier(table):
         raise DrillError(f"invalid identifier: {table!r}")
 
-    # Same split: file plugins have dynamic schemas and no
-    # INFORMATION_SCHEMA.`COLUMNS` rows. DESCRIBE is metadata-only --
-    # deliberately NOT a `SELECT * ... LIMIT 1` probe, which would read user
-    # data to answer a metadata question.
-    if fetch_plugin_type(query, schema) == "file":
-        # `table` is ONE identifier (a filename), not a further dotted
-        # path -- quote it with `quote_identifier`, not
-        # `quote_identifier_path`, or "sales.csv" would be split into a
-        # schema segment "sales" and a table segment "csv".
-        target = f"{quote_identifier_path(schema)}.{quote_identifier(table)}"
-        result = query(f"DESCRIBE {target}", 10_000)
-        return [
-            {
-                "name": row.get("COLUMN_NAME"),
-                "data_type": row.get("DATA_TYPE"),
-                "nullable": str(row.get("IS_NULLABLE", "")).upper() == "YES",
-            }
-            for row in result.rows
-        ]
+    plugin_type = fetch_plugin_type(query, schema)
 
-    result = query(
-        "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM INFORMATION_SCHEMA.`COLUMNS` "
-        f"WHERE TABLE_SCHEMA = {quote_literal_path(schema)} "
-        f"AND TABLE_NAME = {quote_literal(table)} ORDER BY ORDINAL_POSITION",
-        10_000,
-    )
-    return [
-        {
-            "name": row.get("COLUMN_NAME"),
-            "data_type": row.get("DATA_TYPE"),
-            "nullable": str(row.get("IS_NULLABLE", "")).upper() == "YES",
-        }
-        for row in result.rows
-    ]
+    # An HTTP plugin has no column metadata until a query has actually been
+    # run against the endpoint -- there is no schema to DESCRIBE and no
+    # table to probe. Returning [] here would read as "this table has no
+    # columns"; fail loudly and explain instead. `schema`/`table` are
+    # already known to be valid identifiers at this point (checked above and
+    # by `fetch_plugin_type`'s `quote_literal_path` call), so they are safe
+    # to embed directly in the message.
+    if plugin_type == "http":
+        raise DrillError(
+            f"Drill cannot report columns for the HTTP plugin schema '{schema}' until a query "
+            "has been run against it. Run a query such as\n"
+            f"  SELECT * FROM `{schema}`.`{table}` LIMIT 10\n"
+            "and read the column names from the result."
+        )
+
+    if plugin_type in DYNAMIC_SCHEMA_TYPES:
+        return _probe_columns(query, schema, table, plugin_type)
+
+    return _describe_columns(query, schema, table)
 
 
 # -- client --------------------------------------------------------------
@@ -428,6 +573,7 @@ class RestClient:
             rows=rows,
             query_id=payload.get("queryId"),
             truncated=max_rows > 0 and len(rows) >= max_rows,
+            metadata=payload.get("metadata") or [],
         )
 
     # -- metadata ----------------------------------------------------------

@@ -80,6 +80,21 @@ def test_query_returns_columns_and_rows(fake_jaydebeapi):
     assert result.truncated is False
 
 
+def test_query_populates_metadata_from_cursor_description(fake_jaydebeapi):
+    cursor = fake_jaydebeapi.connect.return_value.cursor.return_value
+    cursor.description = [("id", "INTEGER"), ("name", "VARCHAR")]
+    cursor.fetchmany.return_value = [(1, "x")]
+    result = make_client().query("SELECT 1", max_rows=10)
+    assert result.metadata == ["INTEGER", "VARCHAR"]
+
+
+def test_query_metadata_is_none_per_column_when_type_code_is_absent(fake_jaydebeapi):
+    # The default fixture's description entries carry a `None` type_code;
+    # this must not raise, and must not fabricate a type.
+    result = make_client().query("SELECT 1", max_rows=10)
+    assert result.metadata == [None, None]
+
+
 def test_query_respects_max_rows(fake_jaydebeapi):
     cursor = fake_jaydebeapi.connect.return_value.cursor.return_value
     cursor.fetchmany.return_value = [(1, "x"), (2, "y")]

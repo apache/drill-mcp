@@ -401,8 +401,11 @@ class TestKerberosAuth:
         assert client._http.auth is sentinel
 
 
-def query_response(columns, rows):
-    return httpx.Response(200, json={"columns": columns, "rows": rows, "queryId": "q"})
+def query_response(columns, rows, metadata=None):
+    payload = {"columns": columns, "rows": rows, "queryId": "q"}
+    if metadata is not None:
+        payload["metadata"] = metadata
+    return httpx.Response(200, json=payload)
 
 
 class TestMetadata:
@@ -451,7 +454,53 @@ class TestMetadata:
             )
         )
         assert make_client().plugin_type("dfs.tmp") == "file"
-        assert b"'dfs.tmp'" in route.calls.last.request.read()
+        # SCHEMATA is fetched unfiltered (not `WHERE SCHEMA_NAME = ...`) and
+        # matched in Python -- a bare plugin name has no exact SCHEMATA row,
+        # only its workspaces do. See test_plugin_type_resolves_a_bare_plugin_name.
+        body = route.calls.last.request.read()
+        assert b"SCHEMATA" in body
+        assert b"WHERE" not in body
+
+    @respx.mock
+    def test_plugin_type_resolves_a_bare_plugin_name(self):
+        # `WHERE SCHEMA_NAME = 'dfs'` finds nothing when only `dfs.tmp` and
+        # `dfs.root` exist as SCHEMATA rows.
+        respx.post(f"{BASE}/query.json").mock(
+            return_value=query_response(
+                ["SCHEMA_NAME", "TYPE"],
+                [
+                    {"SCHEMA_NAME": "dfs.tmp", "TYPE": "file"},
+                    {"SCHEMA_NAME": "dfs.root", "TYPE": "file"},
+                ],
+            )
+        )
+        assert make_client().plugin_type("dfs") == "file"
+
+    @respx.mock
+    def test_plugin_type_prefers_an_exact_match_over_a_prefix_match(self):
+        respx.post(f"{BASE}/query.json").mock(
+            return_value=query_response(
+                ["SCHEMA_NAME", "TYPE"],
+                [
+                    {"SCHEMA_NAME": "dfs.tmp", "TYPE": "file"},
+                    {"SCHEMA_NAME": "dfs", "TYPE": "exact"},
+                ],
+            )
+        )
+        assert make_client().plugin_type("dfs") == "exact"
+
+    @respx.mock
+    def test_plugin_type_bare_name_resolution_rejects_injection(self):
+        # The Python-side prefix match never interpolates `schema` into SQL,
+        # but the identifier is still validated up front -- fail fast, no
+        # network call, and no chance of the malicious string leaking into
+        # a later query built from the resolved plugin type.
+        route = respx.post(f"{BASE}/query.json").mock(
+            return_value=query_response(["SCHEMA_NAME", "TYPE"], [])
+        )
+        with pytest.raises(DrillError, match="invalid identifier"):
+            make_client().plugin_type("dfs' OR '1'='1")
+        assert not route.called
 
 
 class TestFilePluginMetadata:
@@ -504,39 +553,132 @@ class TestFilePluginMetadata:
         assert b"INFORMATION_SCHEMA" in route.calls[1].request.read()
 
     @respx.mock
-    def test_columns_uses_describe_for_a_file_plugin(self):
+    def test_columns_probes_a_file_plugin_instead_of_describe(self):
+        # DESCRIBE cannot answer for a file plugin: its schema is discovered
+        # at read time, not registered anywhere DESCRIBE can consult. Follows
+        # sqlalchemy-drill's get_columns (base.py:405-451): probe with
+        # SELECT ... LIMIT 1, read `columns`/`metadata`, strip precision.
         route = respx.post(f"{BASE}/query.json").mock(
             side_effect=[
                 self._schemata("file"),
-                query_response(
-                    ["COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE"],
-                    [{"COLUMN_NAME": "id", "DATA_TYPE": "BIGINT", "IS_NULLABLE": "YES"}],
-                ),
+                query_response(["id"], [{"id": 12345}], metadata=["BIGINT"]),
             ]
         )
         assert make_client().columns("dfs.tmp", "sales.csv") == [
-            {"name": "id", "data_type": "BIGINT", "nullable": True}
+            {"name": "id", "data_type": "BIGINT", "nullable": None}
         ]
         body = route.calls[1].request.read()
-        assert b"DESCRIBE" in body
+        assert b"DESCRIBE" not in body
+        assert b"SELECT * FROM" in body
+        assert b"LIMIT 1" in body
         # The filename is ONE identifier, not a further dotted path: it must
         # stay inside a single backtick pair, or Drill reads the extension as
         # the table name and the stem as part of the schema.
         assert b"`sales.csv`" in body
         assert b"`sales`.`csv`" not in body
-        # Metadata-only: never read user rows to answer a metadata question.
-        assert b"LIMIT 1" not in body
-        assert b"SELECT *" not in body
+
+    @respx.mock
+    def test_columns_probe_strips_precision_from_the_type_string(self):
+        respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("file"),
+                query_response(["name"], [{"name": "Alice"}], metadata=["VARCHAR(10)"]),
+            ]
+        )
+        assert make_client().columns("dfs.tmp", "people.csv") == [
+            {"name": "name", "data_type": "VARCHAR", "nullable": None}
+        ]
+
+    @respx.mock
+    def test_columns_probe_falls_back_to_none_type_when_metadata_is_absent(self):
+        # Older Drill (< 1.19) omits the `metadata` array entirely; that is
+        # not an error.
+        respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("file"),
+                query_response(["id"], [{"id": 1}]),  # no metadata=...
+            ]
+        )
+        assert make_client().columns("dfs.tmp", "sales.csv") == [
+            {"name": "id", "data_type": None, "nullable": None}
+        ]
+
+    @respx.mock
+    def test_columns_probe_never_leaks_the_sampled_row_value(self):
+        # Privacy constraint: the probe reads one row, but describe_table
+        # must return ONLY column names and types -- never the sampled row.
+        respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("file"),
+                query_response(
+                    ["ssn"], [{"ssn": "078-05-1120-SENTINEL"}], metadata=["VARCHAR(11)"]
+                ),
+            ]
+        )
+        result = make_client().columns("dfs.tmp", "people.csv")
+        assert "078-05-1120-SENTINEL" not in repr(result)
+
+    @respx.mock
+    def test_columns_probes_a_mongo_plugin_with_double_star(self):
+        route = respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("mongo"),
+                query_response(["id"], [{"id": 1}], metadata=["BIGINT"]),
+            ]
+        )
+        assert make_client().columns("dfs.tmp", "mycollection") == [
+            {"name": "id", "data_type": "BIGINT", "nullable": None}
+        ]
+        assert len(route.calls) == 2
+        body = route.calls[1].request.read()
+        assert b"SELECT `**` FROM" in body
+        assert b"LIMIT 1" in body
+        # Collections carry no dots, so the combined path is quoted
+        # segment-wise like any other dotted schema path.
+        assert b"`dfs`.`tmp`.`mycollection`" in body
+
+    @respx.mock
+    def test_columns_probes_a_splunk_plugin(self):
+        route = respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("splunk"),
+                query_response(["host"], [{"host": "web1"}], metadata=["VARCHAR"]),
+            ]
+        )
+        assert make_client().columns("dfs.tmp", "main") == [
+            {"name": "host", "data_type": "VARCHAR", "nullable": None}
+        ]
+        body = route.calls[1].request.read()
+        assert b"SELECT * FROM" in body
+
+    @respx.mock
+    def test_columns_probe_handles_a_table_that_is_a_registered_view(self):
+        # sqlalchemy-drill's dialect special-cases a view name here because
+        # its OWN quoting scheme (dot-counting to split plugin/workspace/
+        # filename) mishandles a name that doesn't fit that shape. This
+        # module's `_probe_target` quotes every schema segment and the
+        # table/filename uniformly, with no such failure mode, so a table
+        # that happens to be a view needs no special handling: the same
+        # `SELECT * FROM ... LIMIT 1` probe answers correctly either way.
+        route = respx.post(f"{BASE}/query.json").mock(
+            side_effect=[
+                self._schemata("file"),
+                query_response(["id"], [{"id": 1}], metadata=["BIGINT"]),
+            ]
+        )
+        assert make_client().columns("dfs.tmp", "top_sales") == [
+            {"name": "id", "data_type": "BIGINT", "nullable": None}
+        ]
+        body = route.calls[1].request.read()
+        assert b"SELECT * FROM" in body
+        assert b"`top_sales`" in body
 
     @respx.mock
     def test_columns_keeps_a_multi_dot_filename_in_one_backtick_pair(self):
         route = respx.post(f"{BASE}/query.json").mock(
             side_effect=[
                 self._schemata("file"),
-                query_response(
-                    ["COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE"],
-                    [{"COLUMN_NAME": "id", "DATA_TYPE": "BIGINT", "IS_NULLABLE": "YES"}],
-                ),
+                query_response(["id"], [{"id": 1}], metadata=["BIGINT"]),
             ]
         )
         make_client().columns("dfs.tmp", "archive.2024.json")
@@ -548,14 +690,11 @@ class TestFilePluginMetadata:
         route = respx.post(f"{BASE}/query.json").mock(
             side_effect=[
                 self._schemata("file"),
-                query_response(
-                    ["COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE"],
-                    [{"COLUMN_NAME": "id", "DATA_TYPE": "BIGINT", "IS_NULLABLE": "YES"}],
-                ),
+                query_response(["id"], [{"id": 1}], metadata=["BIGINT"]),
             ]
         )
         assert make_client().columns("dfs.tmp", "README") == [
-            {"name": "id", "data_type": "BIGINT", "nullable": True}
+            {"name": "id", "data_type": "BIGINT", "nullable": None}
         ]
         assert b"`README`" in route.calls[1].request.read()
 
@@ -576,7 +715,9 @@ class TestFilePluginMetadata:
         assert not route.called
 
     @respx.mock
-    def test_columns_uses_information_schema_for_a_non_file_plugin(self):
+    def test_columns_uses_describe_for_a_non_dynamic_plugin(self):
+        # "jdbc" is not in DYNAMIC_SCHEMA_TYPES, so DESCRIBE (metadata-only,
+        # never reads user data) answers directly -- no probe needed.
         route = respx.post(f"{BASE}/query.json").mock(
             side_effect=[
                 self._schemata("jdbc"),
@@ -588,7 +729,49 @@ class TestFilePluginMetadata:
         )
         result = make_client().columns("mysql.app", "t")
         assert result == [{"name": "id", "data_type": "INTEGER", "nullable": False}]
-        assert b"INFORMATION_SCHEMA" in route.calls[1].request.read()
+        body = route.calls[1].request.read()
+        assert b"DESCRIBE" in body
+        assert b"LIMIT 1" not in body
+        assert b"SELECT *" not in body
+
+    @respx.mock
+    def test_columns_on_an_http_plugin_raises_an_explanatory_error(self):
+        respx.post(f"{BASE}/query.json").mock(return_value=self._schemata("http"))
+        with pytest.raises(DrillError) as exc_info:
+            make_client().columns("dfs.tmp", "results")
+        message = str(exc_info.value)
+        assert "dfs.tmp" in message
+        assert "run" in message.lower() or "query" in message.lower()
+        assert "LIMIT" in message
+
+    @respx.mock
+    def test_view_names_returns_the_view_names_for_a_schema(self):
+        route = respx.post(f"{BASE}/query.json").mock(
+            return_value=query_response(["TABLE_NAME"], [{"TABLE_NAME": "top_sales"}])
+        )
+        client = make_client()
+        from drill_mcp.client_rest import fetch_view_names
+
+        assert fetch_view_names(client.query, "dfs.tmp") == ["top_sales"]
+        assert b"VIEWS" in route.calls.last.request.read()
+
+    @respx.mock
+    def test_view_names_returns_empty_list_when_the_query_fails(self):
+        # Matches the dialect's tolerance (base.py:362-372): a missing VIEWS
+        # relation (e.g. an older Drill) must not break column lookup.
+        respx.post(f"{BASE}/query.json").mock(
+            return_value=httpx.Response(500, json={"errorMessage": "no such relation"})
+        )
+        from drill_mcp.client_rest import fetch_view_names
+
+        assert fetch_view_names(make_client().query, "dfs.tmp") == []
+
+    @respx.mock
+    def test_view_names_rejects_injection_in_schema_name(self):
+        from drill_mcp.client_rest import fetch_view_names
+
+        with pytest.raises(DrillError, match="invalid identifier"):
+            fetch_view_names(make_client().query, "dfs'; DROP TABLE x --")
 
     @respx.mock
     def test_unknown_plugin_type_falls_back_to_information_schema(self):
