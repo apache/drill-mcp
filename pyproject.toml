@@ -46,10 +46,25 @@ dependencies = [
 [project.optional-dependencies]
 jdbc = ["jaydebeapi>=1.2.3", "JPype1>=1.5"]
 kerberos = ["httpx-gssapi>=0.3"]
-dev = ["pytest>=8.0", "respx>=0.21", "pytest-cov>=5.0", "ruff>=0.6"]
+dev = [
+    "pytest>=8.0",
+    "respx>=0.21",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "types-PyYAML>=6.0",
+]
 
 [project.scripts]
 drill-mcp = "drill_mcp.server:main"
+
+[tool.mypy]
+files = ["drill_mcp"]
+
+# Optional extras (jdbc, kerberos) are not installed in CI and ship no stubs.
+[[tool.mypy.overrides]]
+module = ["jaydebeapi", "httpx_gssapi"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

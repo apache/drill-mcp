@@ -183,7 +183,7 @@ def _check(sql: str, policy: Policy, depth: int) -> None:
     _check_write(statement, policy, depth)
 
 
-def _check_write(statement: exp.Expression, policy: Policy, depth: int) -> None:
+def _check_write(statement: exp.Expr, policy: Policy, depth: int) -> None:
     if isinstance(statement, _READ_TYPES):
         embedded = statement.find(*_EMBEDDED_WRITE_TYPES)
         if embedded is not None:
@@ -251,7 +251,7 @@ def _explain_body(statement: exp.Command) -> str:
     return re.sub(r"^\s*PLAN\s+FOR\s+", "", text, flags=re.IGNORECASE)
 
 
-def _write_targets(statement: exp.Expression) -> list[exp.Table]:
+def _write_targets(statement: exp.Expr) -> list[exp.Table]:
     # sqlglot >= 30.20 puts DROP targets in a `tables` list (DROP TABLE a, b);
     # older releases and CREATE use `this`. Any non-Table target fails closed.
     targets = statement.args.get("tables") or [statement.this]
@@ -263,7 +263,7 @@ def _schema_prefix(table: exp.Table) -> str:
     return ".".join(part for part in (table.catalog, table.db) if part)
 
 
-def _check_hidden(statement: exp.Expression, policy: Policy) -> None:
+def _check_hidden(statement: exp.Expr, policy: Policy) -> None:
     if not policy.hidden_schemas:
         return
 

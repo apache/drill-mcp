@@ -34,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
 
@@ -48,6 +48,26 @@ jobs:
       # where a test accidentally started depending on one.
       - name: Install
         run: pip install -e ".[dev]"
+
+      - name: Test
+        run: pytest
+
+  # Installs the oldest version of every direct dependency the floors in
+  # pyproject.toml allow, so a floor that has quietly stopped being true
+  # fails here instead of on a user's machine.
+  lowest-deps:
+    name: tests (lowest deps)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.11"
+          activate-environment: true
+
+      - name: Install
+        run: uv pip install --resolution lowest-direct -e ".[dev]"
 
       - name: Test
         run: pytest
@@ -71,3 +91,6 @@ jobs:
 
       - name: Ruff format check
         run: ruff format --check .
+
+      - name: Type check
+        run: mypy
