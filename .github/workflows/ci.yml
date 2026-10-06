@@ -61,13 +61,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v10
+      # Not astral-sh/setup-uv: the ASF only allows allowlisted third-party
+      # actions, so install uv from PyPI instead.
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-          activate-environment: true
 
       - name: Install
-        run: uv pip install --resolution lowest-direct -e ".[dev]"
+        run: |
+          pip install uv
+          uv pip install --system --resolution lowest-direct -e ".[dev]"
 
       - name: Test
         run: pytest
