@@ -1,5 +1,7 @@
 # Drill-MCP Server
 
+<!-- mcp-name: io.github.apache/drill-mcp -->
+
 The official [MCP](https://modelcontextprotocol.io/) server for [Apache Drill](https://drill.apache.org/).
 It lets an MCP client run read-only (and narrowly, explicitly allow-listed
 write) SQL against a Drill cluster, and inspect schemas, storage plugins,
