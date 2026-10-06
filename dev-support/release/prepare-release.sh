@@ -65,6 +65,7 @@ export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
 src="apache-drill-mcp-${version}-src"
 git archive --format=tar.gz --prefix="${src}/" -o "${out}/${src}.tar.gz" HEAD
 uv build --sdist --wheel -o "$out" .
+rm -f "${out}/.gitignore"  # uv drops one into its output directory
 uvx twine check "$out"/drill_mcp-*
 
 cd "$out"
