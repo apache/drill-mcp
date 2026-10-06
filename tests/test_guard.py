@@ -124,6 +124,10 @@ class TestWritesWithAnAllowlist:
     def test_drop_in_allowed_plugin_permitted(self):
         check("DROP TABLE dfs.tmp.old", OPEN)
 
+    def test_multi_table_drop_checks_every_target(self):
+        with pytest.raises(PolicyError):
+            check("DROP TABLE dfs.tmp.old, s3.bucket.prod", OPEN)
+
     def test_ctas_into_other_plugin_rejected(self):
         with pytest.raises(PolicyError, match="writable_plugins"):
             check("CREATE TABLE s3.bucket.out AS SELECT 1", OPEN)
@@ -440,7 +444,7 @@ class TestCoverageGaps:
 
     def test_ctas_with_explicit_column_list_permitted(self):
         # The parenthesized column list wraps the target table in an
-        # exp.Schema node; _write_target must unwrap it to find the table.
+        # exp.Schema node; _write_targets must unwrap it to find the table.
         check("CREATE TABLE dfs.tmp.out (a INT) AS SELECT 1", OPEN)
 
     def test_create_with_no_resolvable_target_rejected(self):

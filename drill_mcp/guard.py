@@ -212,23 +212,24 @@ def _check_write(statement: exp.Expression, policy: Policy, depth: int) -> None:
             raise PolicyError(
                 f"{statement.key.upper()} {kind or 'UNKNOWN'} is not permitted"
             )
-        target = _write_target(statement)
-        if target is None:
+        targets = _write_targets(statement)
+        if not targets:
             raise PolicyError(
                 "could not determine the target of this statement, rejecting"
             )
-        qualified = _schema_prefix(target)
-        if not qualified:
-            raise PolicyError(
-                f"write target '{target.name}' is not schema-qualified; "
-                "qualify it with a plugin listed in writable_plugins"
-            )
-        if not matches_prefix(qualified, policy.writable_plugins):
-            raise PolicyError(
-                f"writes to '{qualified}' are not permitted; "
-                f"add it to writable_plugins to allow this (currently: "
-                f"{list(policy.writable_plugins) or 'none'})"
-            )
+        for target in targets:
+            qualified = _schema_prefix(target)
+            if not qualified:
+                raise PolicyError(
+                    f"write target '{target.name}' is not schema-qualified; "
+                    "qualify it with a plugin listed in writable_plugins"
+                )
+            if not matches_prefix(qualified, policy.writable_plugins):
+                raise PolicyError(
+                    f"writes to '{qualified}' are not permitted; "
+                    f"add it to writable_plugins to allow this (currently: "
+                    f"{list(policy.writable_plugins) or 'none'})"
+                )
         return
 
     raise PolicyError(f"statement type {statement.key.upper()} is not permitted")
@@ -250,11 +251,12 @@ def _explain_body(statement: exp.Command) -> str:
     return re.sub(r"^\s*PLAN\s+FOR\s+", "", text, flags=re.IGNORECASE)
 
 
-def _write_target(statement: exp.Expression) -> exp.Table | None:
-    target = statement.this
-    if isinstance(target, exp.Schema):
-        target = target.this
-    return target if isinstance(target, exp.Table) else None
+def _write_targets(statement: exp.Expression) -> list[exp.Table]:
+    # sqlglot >= 30.20 puts DROP targets in a `tables` list (DROP TABLE a, b);
+    # older releases and CREATE use `this`. Any non-Table target fails closed.
+    targets = statement.args.get("tables") or [statement.this]
+    targets = [t.this if isinstance(t, exp.Schema) else t for t in targets]
+    return targets if all(isinstance(t, exp.Table) for t in targets) else []
 
 
 def _schema_prefix(table: exp.Table) -> str:
