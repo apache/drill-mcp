@@ -116,6 +116,30 @@ Full parameters, return shapes, errors, and per-tool surprises are in
   single call but never raise it above the configured limit. A truncated
   result is marked `"truncated": true`.
 
+## Deployment
+
+`drill-mcp` speaks MCP over stdio only. Each MCP client launches its own
+server process, and that process serves exactly one client. It is built
+for local, single-user use.
+
+- **Every tool call runs as the Drill identity in the config.** The server
+  has no notion of who is calling; whoever can talk to the process gets
+  that user's Drill access.
+- **Policy is per process.** `writable_plugins`, `hidden_schemas`, and
+  `max_rows` apply to every call the process handles.
+- **`cancel_query` accepts any query id** the configured Drill user is
+  permitted to cancel.
+
+To give several people access, run one process per user with that user's
+own credentials. Do not put a network proxy in front of the stdio process:
+that would share one Drill identity, one policy, and unrestricted
+`cancel_query` with everyone who can reach the proxy.
+
+An HTTP transport is a possible future enhancement. Shipping one safely
+needs client authentication, a Drill identity (or impersonation) per
+caller, authorization for `cancel_query`, and confirmation that the JDBC
+backend tolerates concurrent calls.
+
 ## Backends
 
 - **REST** (default, `backend: rest`): talks to a Drillbit's HTTP endpoints
