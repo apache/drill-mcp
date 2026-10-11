@@ -18,6 +18,8 @@
 #
 
 import sys
+import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -146,11 +148,51 @@ def test_query_respects_max_rows(fake_jaydebeapi):
     assert result.truncated is True
 
 
-def test_connection_is_reused(fake_jaydebeapi):
+def test_each_query_opens_and_closes_its_own_connection(fake_jaydebeapi):
     client = make_client()
     client.query("SELECT 1", max_rows=1)
     client.query("SELECT 2", max_rows=1)
-    assert fake_jaydebeapi.connect.call_count == 1
+    assert fake_jaydebeapi.connect.call_count == 2
+    assert fake_jaydebeapi.connect.return_value.close.call_count == 2
+
+
+def test_connection_is_closed_when_the_query_fails(fake_jaydebeapi):
+    cursor = fake_jaydebeapi.connect.return_value.cursor.return_value
+    cursor.execute.side_effect = RuntimeError("boom")
+    with pytest.raises(DrillError):
+        make_client().query("SELECT 1", max_rows=1)
+    fake_jaydebeapi.connect.return_value.close.assert_called_once()
+
+
+def test_concurrent_queries_do_not_share_a_connection(fake_jaydebeapi):
+    # The MCP SDK runs sync tools on worker threads, so parallel tool calls
+    # reach `query` concurrently. A slow connect makes the calls overlap.
+    connections = []
+
+    def slow_connect(*args, **kwargs):
+        time.sleep(0.05)
+        connection = MagicMock()
+        connection.cursor.return_value.description = [("a", None)]
+        connection.cursor.return_value.fetchmany.return_value = [(1,)]
+        connections.append(connection)
+        return connection
+
+    fake_jaydebeapi.connect.side_effect = slow_connect
+    client = make_client()
+    barrier = threading.Barrier(2)
+
+    def run():
+        barrier.wait()
+        client.query("SELECT 1", max_rows=1)
+
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(connections) == 2
+    for connection in connections:
+        connection.close.assert_called_once()
 
 
 def test_basic_auth_credentials_are_passed(fake_jaydebeapi):
@@ -185,17 +227,6 @@ def test_driver_error_is_wrapped(fake_jaydebeapi):
         make_client().query("SELECT 1", max_rows=1)
 
 
-def test_close_closes_the_connection(fake_jaydebeapi):
-    client = make_client()
-    client.query("SELECT 1", max_rows=1)
-    client.close()
-    fake_jaydebeapi.connect.return_value.close.assert_called_once()
-
-
-def test_close_is_safe_before_connecting():
-    make_client().close()  # does not raise
-
-
 def test_driver_error_does_not_leak_the_password(fake_jaydebeapi):
     fake_jaydebeapi.connect.side_effect = RuntimeError(
         "auth failed for user alice/s3cret"
@@ -226,16 +257,14 @@ def test_query_error_does_not_leak_the_password(fake_jaydebeapi):
 
 
 def test_close_error_does_not_leak_the_password(fake_jaydebeapi):
-    client = make_client(auth="basic", user="alice", password="s3cret")
-    client.query("SELECT 1", max_rows=1)
     fake_jaydebeapi.connect.return_value.close.side_effect = RuntimeError(
         "close failed: password was s3cret"
     )
     with pytest.raises(DrillError) as exc_info:
-        client.close()
+        make_client(auth="basic", user="alice", password="s3cret").query(
+            "SELECT 1", max_rows=1
+        )
     assert "s3cret" not in str(exc_info.value)
-    # The stale handle must not linger after a failed close.
-    assert client._connection is None
 
 
 def test_management_methods_are_not_implemented(fake_jaydebeapi):

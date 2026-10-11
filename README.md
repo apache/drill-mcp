@@ -137,8 +137,7 @@ that would share one Drill identity, one policy, and unrestricted
 
 An HTTP transport is a possible future enhancement. Shipping one safely
 needs client authentication, a Drill identity (or impersonation) per
-caller, authorization for `cancel_query`, and confirmation that the JDBC
-backend tolerates concurrent calls.
+caller, and authorization for `cancel_query`.
 
 ## Backends
 

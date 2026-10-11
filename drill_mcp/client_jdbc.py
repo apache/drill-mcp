@@ -70,7 +70,6 @@ def _type_name(description_entry: tuple) -> str | None:
 class JdbcClient:
     def __init__(self, config: Config) -> None:
         self._config = config
-        self._connection: Any = None
 
     # -- connection --------------------------------------------------------
 
@@ -108,8 +107,10 @@ class JdbcClient:
         return text
 
     def _connect(self) -> Any:
-        if self._connection is not None:
-            return self._connection
+        # A fresh connection per call, like the Quarkus JDBC MCP server. The
+        # MCP SDK runs sync tools on worker threads, so a shared connection
+        # would be raced on; nothing shared means nothing to lock.
+        # ponytail: pays a connect per query; pool if connect latency matters.
         try:
             import jaydebeapi
         except ImportError as exc:
@@ -122,7 +123,7 @@ class JdbcClient:
             else []
         )
         try:
-            self._connection = jaydebeapi.connect(
+            return jaydebeapi.connect(
                 DRIVER_CLASS,
                 self._jdbc_url(),
                 credentials,
@@ -132,26 +133,14 @@ class JdbcClient:
             raise DrillError(
                 f"could not connect to Drill over JDBC: {self._scrub(str(exc))}"
             ) from exc
-        return self._connection
-
-    def close(self) -> None:
-        if self._connection is None:
-            return
-        try:
-            self._connection.close()
-        except Exception as exc:
-            raise DrillError(
-                f"could not close the JDBC connection: {self._scrub(str(exc))}"
-            ) from exc
-        finally:
-            self._connection = None
 
     # -- queries -------------------------------------------------------------
 
     def query(self, sql: str, max_rows: int) -> QueryResult:
         connection = self._connect()
         try:
-            with closing(connection.cursor()) as cursor:
+            # Closing inside the try routes a close failure through _scrub too.
+            with closing(connection), closing(connection.cursor()) as cursor:
                 cursor.execute(sql)
                 rows = cursor.fetchmany(max_rows)
                 description = cursor.description or []
